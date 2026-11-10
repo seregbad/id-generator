@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Генератор ИД</title>
+  <meta name="description" content="Исполнительная документация: АОСР, АООК, разбивка осей, ГРО, реестр, ЖВК, ОЖР, смета, КС-2, КС-3">
+  <meta name="theme-color" content="#1f3864">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-btn" id="menuBtn" aria-label="Меню">&#9776;</button>
+    <div class="brand">
+      <span class="brand-mark">ИД</span>
+      <div class="brand-text">
+        <strong>Генератор ИД</strong>
+        <small id="projName">—</small>
+      </div>
+    </div>
+    <span class="save-state" id="saveState"></span>
+    <a class="save-state" id="syncState" href="#/project" hidden></a>
+    <button class="btn btn-ghost hide-sm" id="saveFileTop" title="Сохранить проект в файл">Сохранить файл</button>
+  </header>
+
+  <nav class="sidebar" id="sidebar">
+    <div class="nav-group">Данные</div>
+    <a href="#/import" data-view="import">Загрузка документов</a>
+    <a href="#/settings" data-view="settings">Объект и договор</a>
+    <a href="#/orgs" data-view="orgs">Организации</a>
+    <a href="#/people" data-view="people">Представители</a>
+    <a href="#/materials" data-view="materials">Материалы</a>
+    <a href="#/balance" data-view="balance">Остатки материалов</a>
+    <a href="#/works" data-view="works">Справочник работ</a>
+    <a href="#/acts" data-view="acts">Журнал актов</a>
+    <div class="nav-group">КС и ОЖР</div>
+    <a href="#/smeta" data-view="smeta">Смета, КС-2, КС-3</a>
+    <a href="#/ozhr" data-view="ozhr">Общий журнал работ</a>
+    <div class="nav-group">Выгрузка</div>
+    <a href="#/check" data-view="check">Проверка комплекта</a>
+    <a href="#/docs" data-view="docs">Документы PDF</a>
+    <div class="nav-group">Прочее</div>
+    <a href="#/project" data-view="project">Проекты и файлы</a>
+    <a href="#/lists" data-view="lists">Списки</a>
+    <a href="#/help" data-view="help">Инструкция</a>
+  </nav>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main" id="main"></main>
+
+  <dialog id="dlg" class="dlg">
+    <form method="dialog" id="dlgForm" class="dlg-inner">
+      <header class="dlg-head">
+        <h2 id="dlgTitle"></h2>
+        <button type="button" class="icon-btn" id="dlgClose" aria-label="Закрыть">&#10005;</button>
+      </header>
+      <div class="dlg-body" id="dlgBody"></div>
+      <footer class="dlg-foot" id="dlgFoot"></footer>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="fileInput" accept=".json,application/json" hidden>
+
+  <script src="js/core.js"></script>
+  <script src="js/importer.js"></script>
+  <script src="js/backup.js"></script>
+  <script src="js/sync.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

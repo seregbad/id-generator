@@ -1,0 +1,16 @@
+{
+  "name": "Генератор исполнительной документации",
+  "short_name": "Генератор ИД",
+  "description": "АОСР, АООК, разбивка осей, ГРО, реестр ИД, ЖВК, ОЖР, смета, КС-2, КС-3 в PDF",
+  "lang": "ru",
+  "start_url": "./index.html#/acts",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f6f9",
+  "theme_color": "#1f3864",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
