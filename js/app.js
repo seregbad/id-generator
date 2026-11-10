@@ -769,7 +769,7 @@
       const updCnt = () => { const n = P.acts.filter(a => a.print).length; cntEl.textContent = n ? 'Отмечено к печати: ' + n : ''; };
       main.appendChild(head('Журнал актов', 'Одна запись = один акт. Номер считается сам по типу и разделу (КЖ-01, КЖ-02…).', [
         btn('Отметить все', () => { const all = P.acts.every(a => a.print); P.acts.forEach(a => a.print = all ? '' : 1); touch(); ctl.draw(); }),
-        btn('Выгрузить отмеченные…', () => batchActs(), 'btn-primary')
+        btn('Выгрузить отмеченные…', () => batchActs(), 'btn-primary'), fmtSwitch()
       ]));
       main.appendChild(cntEl);
       const fit = document.createElement('label'); fit.className = 'check small';
@@ -811,10 +811,11 @@
     },
     smeta() {
       main.appendChild(head('Смета, КС-2, КС-3', 'Цены — с НДС, как в договоре. НДС выделяется «в т.ч.» автоматически.', [
-        btn('Смета PDF', () => makeDoc('Смета', () => IDPdf.smetaDoc(P))),
-        btn('КС-2 PDF', () => makeDoc('КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P))),
-        btn('КС-3 PDF', () => makeDoc('КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P))),
-        btn('Все три (ZIP)', () => makeZip('КС', [['Смета', () => IDPdf.smetaDoc(P)], ['КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P)], ['КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P)]]), 'btn-primary')
+        btn('Смета', () => makeDoc('Смета', () => IDPdf.smetaDoc(P))),
+        btn('КС-2', () => makeDoc('КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P))),
+        btn('КС-3', () => makeDoc('КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P))),
+        btn('Все три (ZIP)', () => makeZip('КС', [['Смета', () => IDPdf.smetaDoc(P)], ['КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P)], ['КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P)]]), 'btn-primary'),
+        fmtSwitch()
       ]));
       const kpi = document.createElement('div'); kpi.className = 'kpi';
       const updKpi = () => {
@@ -896,7 +897,7 @@
     ozhr() {
       const o = P.ozhr;
       main.appendChild(head('Общий журнал работ', 'Приказ Минстроя от 02.12.2022 № 1026/пр. Разделы 3 и 5 заполняются из журнала актов автоматически.', [
-        btn('ОЖР целиком PDF', () => makeDoc('Общий журнал работ', () => IDPdf.ozhrDoc(P)), 'btn-primary')
+        btn('ОЖР целиком', () => makeDoc('Общий журнал работ', () => IDPdf.ozhrDoc(P)), 'btn-primary'), fmtSwitch()
       ]));
       main.appendChild(card('Титульный лист', [
         para('Представители застройщика, подрядчика, стройконтроля и авторского надзора берутся из раздела «Представители» (действующие на сегодня). Поля ниже — для того, чего нет в других разделах.'),
@@ -954,7 +955,7 @@
     balance() {
       const rows = C.materialBalance(P);
       main.appendChild(head('Остатки материалов', 'Поставлено (количество в «Материалах») − израсходовано по актам (поле «расход» у материала в карточке АОСР / АООК) = остаток на объекте.', [
-        btn('Ведомость PDF', () => makeDoc('Ведомость материалов', () => IDPdf.balanceDoc(P)), 'btn-primary')
+        btn('Ведомость', () => makeDoc('Ведомость материалов', () => IDPdf.balanceDoc(P)), 'btn-primary'), fmtSwitch()
       ]));
       if (!rows.length) { main.appendChild(card(null, [para('Материалов пока нет.')])); return; }
       const t = document.createElement('table'); t.className = 't';
@@ -968,7 +969,7 @@
       main.appendChild(w);
     },
     docs() {
-      main.appendChild(head('Документы PDF', 'Формирование печатных форм. Файлы создаются на этом устройстве, без интернета.'));
+      main.appendChild(head('Документы PDF и Word', 'Формирование печатных форм. Файлы создаются на этом устройстве, без интернета. Word (.docx) — если документ нужно поправить перед печатью.', [fmtSwitch()]));
       const grid = document.createElement('div'); grid.className = 'doc-grid';
       const dc = (title, desc, buttons) => {
         const c = document.createElement('div'); c.className = 'card doc-card';
@@ -1291,12 +1292,26 @@
     d.innerHTML = '<p style="display:flex;gap:10px;align-items:center"><span class="spinner"></span> ' + esc(text) + '</p>';
     openDialog('Формирование', d, []);
   }
+  // формат выгрузки: PDF или Word (.docx) — переключатель на страницах с печатью, запоминается на устройстве
+  const outFmt = () => { try { return localStorage.getItem('idgen.outFormat') === 'docx' ? 'docx' : 'pdf'; } catch (e) { return 'pdf'; } };
+  function fmtSwitch() {
+    const w = document.createElement('div'); w.className = 'seg'; w.title = 'В каком формате выгружать документы';
+    const draw = () => {
+      w.innerHTML = '<span class="muted small">Формат:</span>' + [['pdf', 'PDF'], ['docx', 'Word']].map(([v, l]) => '<button type="button" class="btn btn-sm' + (outFmt() === v ? ' btn-primary' : '') + '" data-v="' + v + '">' + l + '</button>').join('');
+      $$('button', w).forEach(b => b.addEventListener('click', () => { try { localStorage.setItem('idgen.outFormat', b.dataset.v); } catch (e) { } draw(); toast(b.dataset.v === 'docx' ? 'Документы будут выгружаться в Word (.docx) — их можно править' : 'Документы будут выгружаться в PDF'); }));
+    };
+    draw(); return w;
+  }
+  async function docBlob(ddFn) {
+    if (outFmt() === 'docx') { await loadScript('vendor/jszip.min.js'); await loadScript('js/docx.js'); return { blob: await IDDocx.toBlob(ddFn()), ext: '.docx' }; }
+    return { blob: await IDPdf.toBlob(ddFn()), ext: '.pdf' };
+  }
   async function makeDoc(name, ddFn) {
     busy('Формирую ' + name + '…');
     try {
       await pdfLibs();
-      const blob = await IDPdf.toBlob(ddFn());
-      deliver(blob, safeName(name) + '.pdf');
+      const r = await docBlob(ddFn);
+      deliver(r.blob, safeName(name) + r.ext);
     } catch (e) { console.error(e); closeDialog(); toast('Ошибка: ' + e.message); }
   }
   function actFileName(a) { const v = C.actView(P, a); return safeName(a.type + ' № ' + v.number + (v.date ? ' от ' + C.fmtDate(v.date) : '')); }
@@ -1313,7 +1328,8 @@
       for (let i = 0; i < items.length; i++) {
         $('#dlgBody').innerHTML = '<p style="display:flex;gap:10px;align-items:center"><span class="spinner"></span> ' + (i + 1) + ' из ' + items.length + ': ' + esc(items[i][0]) + '</p>';
         let fn = items[i][0].split('/').map(safeName).join('/'); if (used[fn]) fn += ' (' + (++used[fn]) + ')'; else used[fn] = 1;
-        zip.file(fn + '.pdf', await IDPdf.toBlob(items[i][1]()));
+        const r = await docBlob(items[i][1]);
+        zip.file(fn + r.ext, r.blob);
       }
       const blob = await zip.generateAsync({ type: 'blob' });
       deliver(blob, safeName(name + ' ' + (P.settings.objectName || '')) + '.zip');

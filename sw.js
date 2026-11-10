@@ -1,8 +1,8 @@
 /* Офлайн-кэш приложения. При изменении файлов увеличьте VERSION. */
-const VERSION = 'idgen-v23';
+const VERSION = 'idgen-v25';
 const FILES = [
   './', './index.html', './manifest.webmanifest',
-  './css/app.css', './js/core.js', './js/app.js', './js/pdf.js', './js/importer.js', './js/backup.js', './js/sync.js',
+  './css/app.css', './js/core.js', './js/app.js', './js/pdf.js', './js/importer.js', './js/backup.js', './js/sync.js', './js/docx.js',
   './vendor/pdfmake.min.js', './vendor/vfs_tinos.js', './vendor/jszip.min.js',
   './vendor/xlsx.full.min.js', './vendor/pdfjs.min.js', './vendor/pdfjs.worker.min.js',
   './vendor/tesseract/tesseract.min.js', './vendor/tesseract/worker.min.js',
