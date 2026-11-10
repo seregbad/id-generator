@@ -220,10 +220,23 @@
             opts: orgKeys, empty: 'Генподрядчик / подрядчик' + (C.builderOrg(P) ? ': ' + C.builderOrg(P).key : ' (не заведён)'),
             hint: 'Выберите субподрядчика, если работы выполнил он: в акт попадут его реквизиты и представитель с ролью «5. Исполнитель работ»'
           }),
-          F('start', 'Дата начала', 'date', { req: 1 }), F('end', 'Дата окончания', 'date', { req: 1 }),
-          F('actDate', 'Дата акта', 'date', { hint: 'Пусто — дата окончания' }),
+          F('start', 'Дата начала', 'date', { req: 1, rerender: 1 }), F('end', 'Дата окончания', 'date', { req: 1, rerender: 1 }),
+          F('actDate', 'Дата акта', 'date', { hint: 'Пусто — дата окончания', rerender: 1 }),
+          // подписанты: по умолчанию — по роли и датам «с/по» в «Представителях»; здесь можно выбрать вручную
+          ...C.REP_ROLES.map((role, i) => {
+            const date = a.actDate || a.end || '';
+            const auto = C.pickRep(P, role, date, a.executor || (C.builderOrg(P) || {}).key);
+            const people = P.people.slice().sort((x, y) => (y.role === role) - (x.role === role));
+            return F('rep' + i, 'Подписант: ' + role.replace(/^\d\.\s*/, ''), 'select', {
+              wide: i === 0 ? 1 : 0,
+              opts: () => people.map(r => ({ v: r.id, l: C.shortName(r.fullName) + (r.position ? ', ' + r.position.toLowerCase() : '') + ' — ' + r.role + ((r.from || r.to) ? ' (' + (r.from ? 'с ' + C.fmtDate(r.from) : '') + (r.to ? ' по ' + C.fmtDate(r.to) : '') + ')' : '') })),
+              empty: auto ? 'Автоматически: ' + C.shortName(auto.fullName) : (i < 2 ? '⚠ Автоматически не нашёлся — выберите' : 'Автоматически: нет (строка пустая)'),
+              hint: i === 0 ? 'Обычно не трогайте: подписанты подбираются сами по роли и датам «с/по» в «Представителях». Выбор здесь — если нужен другой человек или даты не подходят.' : (!auto && i < 2 ? C.repMissingReason(P, role, date) : '')
+            });
+          }),
           F('sheets', 'Листы проекта', 'text', { hint: (() => { const v = C.actView(P, a); return 'В акте, п. 2: «' + (v.project || '—') + '» — шифр взят: ' + v.rdSource + '. Листы добавляются после шифра.'; })() }),
           F('materials', 'Материалы', 'mats', { wide: 1, show: () => a.type === 'АОСР' || isAOOK }),
+          F('forceRegistry', 'Реестр документов о качестве — приложением к акту, даже если документов 5 и меньше (при 6 и больше — всегда, по форме 344/пр)', 'check', { wide: 1, show: () => a.type === 'АОСР' || isAOOK }),
           F('docs', isAOOK ? 'Исполнительные геодезические схемы (п. 5а)' : 'Исполнительные схемы, документы (п. 4)', 'textarea', { wide: 1, ph: w ? w.docs : '' }),
           F('expertise', 'Результаты экспертиз, лаб. испытаний (п. 5б)', 'textarea', { wide: 1, show: () => isAOOK }),
           F('tests', 'Испытания и опробования (п. 6)', 'textarea', { wide: 1, show: () => isAOOK }),
@@ -735,7 +748,7 @@
       const sc = SCHEMA.people;
       const others = Object.values(store.projects).filter(p => p.id !== P.id && p.people.length);
       main.appendChild(head(sc.title, sc.intro, others.length ? [btn('Взять из другого проекта…', () => peopleFromProject(others, () => ctl.draw()))] : []));
-      const ctl = collection(main, 'people', () => P.people, { defaults: () => ({ from: P.settings.startDate || '' }) });
+      const ctl = collection(main, 'people', () => P.people, { defaults: () => ({}) });
     },
     materials() {
       listView('materials', P.materials, () => P.materials, {
@@ -769,17 +782,24 @@
       const updCnt = () => { const n = P.acts.filter(a => a.print).length; cntEl.textContent = n ? 'Отмечено к печати: ' + n : ''; };
       main.appendChild(head('Журнал актов', 'Одна запись = один акт. Номер считается сам по типу и разделу (КЖ-01, КЖ-02…).', [
         btn('Отметить все', () => { const all = P.acts.every(a => a.print); P.acts.forEach(a => a.print = all ? '' : 1); touch(); ctl.draw(); }),
+        btn('Уведомление по отмеченным', () => { const l = P.acts.filter(a => a.print && a.type); if (!l.length) toast('Отметьте акты галочкой «Печать»'); else makeNotice(l); }),
         btn('Выгрузить отмеченные…', () => batchActs(), 'btn-primary'), fmtSwitch()
       ]));
       main.appendChild(cntEl);
+      const rem = reminders(); if (rem) main.appendChild(rem);
       const fit = document.createElement('label'); fit.className = 'check small';
       fit.innerHTML = '<input type="checkbox"' + (P.settings.fitActs !== false ? ' checked' : '') + '> Умещать акт на один лист, если он чуть-чуть не помещается (шрифт уменьшится, но не меньше 78 %)';
       fit.querySelector('input').addEventListener('change', e => { P.settings.fitActs = e.target.checked; touch(); });
       main.appendChild(fit);
+      const reg = document.createElement('label'); reg.className = 'check small'; reg.style.display = 'block';
+      reg.innerHTML = '<input type="checkbox"' + (P.settings.matRegistry !== false ? ' checked' : '') + '> Больше 5 документов о качестве — в п. 3 АОСР (п. 4 АООК) ссылка на реестр, реестр — отдельным листом приложения к акту';
+      reg.querySelector('input').addEventListener('change', e => { P.settings.matRegistry = e.target.checked; touch(); });
+      main.appendChild(reg);
       const ctl = collection(main, 'acts', () => P.acts, {
         check: { key: 'print', title: 'Печать' },
         onCheck: updCnt, after: updCnt,
         rowButtons: [{ icon: '&#128462;', title: 'PDF этого акта', onClick: a => makeAct(a) },
+          { icon: '&#9993;', title: 'Уведомление о вызове на освидетельствование по этому акту', onClick: a => makeNotice([a]) },
           { icon: '&#10549;', title: 'Следующий акт: копия, даты — сразу после этого акта', onClick: a => nextAct(a) }],
         onCopy: cp => { cp.manualNo = ''; cp.print = ''; },
         defaults: () => {
@@ -1173,7 +1193,8 @@
             }
             keyMap[x.orgKey] = here ? here.key : x.orgKey;
           }
-          P.people.push(Object.assign(JSON.parse(JSON.stringify(x)), { id: C.uid(), orgKey: keyMap[x.orgKey], from: P.settings.startDate || '', to: '' }));
+          // «действует с» пустое: иначе акты, датированные раньше начала по договору, остаются без подписанта
+          P.people.push(Object.assign(JSON.parse(JSON.stringify(x)), { id: C.uid(), orgKey: keyMap[x.orgKey], from: '', to: '' }));
         });
         const srcOur = C.orgByKey(src, src.settings.ourOrg);
         if (!P.settings.ourOrg && srcOur && keyMap[srcOur.key]) P.settings.ourOrg = keyMap[srcOur.key];
@@ -1181,6 +1202,27 @@
         toast('Добавлено представителей: ' + idx.length + (orgsAdded ? ', организаций: ' + orgsAdded : ''));
       }
     }]);
+  }
+
+  // напоминания на стартовой странице: сроки документов о качестве, период КС, ошибки комплекта
+  function reminders() {
+    const today = C.todayISO();
+    try { if (localStorage.getItem('idgen.remindHide') === P.id + today) return null; } catch (e) { }
+    const in30 = (() => { const d = new Date(); d.setDate(d.getDate() + 30); return d.getFullYear() + '-' + C.pad2(d.getMonth() + 1) + '-' + C.pad2(d.getDate()); })();
+    const items = [];
+    const mats = P.materials.filter(m => m.name && C.matUntil(m));
+    const expired = mats.filter(m => C.matUntil(m) < today), soon = mats.filter(m => C.matUntil(m) >= today && C.matUntil(m) <= in30);
+    if (expired.length) items.push(['#/materials', 'Истёк документ о качестве: ' + expired.slice(0, 3).map(m => C.matNo(P, m) + ' ' + C.matName(m)).join('; ') + (expired.length > 3 ? ' и ещё ' + (expired.length - 3) : '') + '. Для новых актов нужен действующий документ.']);
+    if (soon.length) items.push(['#/materials', 'В ближайшие 30 дней истекают документы: ' + soon.slice(0, 3).map(m => C.matNo(P, m) + ' ' + C.matName(m) + ' (до ' + C.fmtDate(C.matUntil(m)) + ')').join('; ') + (soon.length > 3 ? ' и ещё ' + (soon.length - 3) : '') + '.']);
+    if (P.smeta.some(r => r.name) && P.ks.periodTo && P.ks.periodTo < today) items.push(['#/smeta', 'Отчётный период КС № ' + (P.ks.number || '—') + ' закончился ' + C.fmtDate(P.ks.periodTo) + '. Сформируйте КС и закройте её — начнётся следующий период.']);
+    const errs = C.projectCheck(P).filter(x => x.lvl === 'err').length;
+    if (errs) items.push(['#/check', 'Проверка комплекта: ошибок — ' + errs + '.']);
+    if (!items.length) return null;
+    const box = document.createElement('div'); box.className = 'notice remind';
+    box.innerHTML = '<div class="remind-head"><b>Напоминания</b><button type="button" class="btn btn-sm">Скрыть до завтра</button></div>' +
+      items.map(([h, t]) => '<a href="' + h + '">' + esc(t) + '</a>').join('');
+    $('button', box).addEventListener('click', () => { try { localStorage.setItem('idgen.remindHide', P.id + today); } catch (e) { } box.remove(); });
+    return box;
   }
 
   // новый объект «по шаблону» текущего: наша организация с представителями, справочник работ, настройки
@@ -1315,6 +1357,21 @@
     } catch (e) { console.error(e); closeDialog(); toast('Ошибка: ' + e.message); }
   }
   function actFileName(a) { const v = C.actView(P, a); return safeName(a.type + ' № ' + v.number + (v.date ? ' от ' + C.fmtDate(v.date) : '')); }
+  // уведомление о готовности к освидетельствованию: дата осмотра и вызывать ли авторский надзор
+  function makeNotice(acts) {
+    const d = document.createElement('div');
+    const def = acts.map(a => a.actDate || a.end).filter(Boolean).sort()[0] || '';
+    d.innerHTML = '<p class="small muted">Актов: ' + acts.length + '. Письмо — от исполнителя работ застройщику (техзаказчику) и его стройконтролю; подписывает представитель подрядчика.</p>' +
+      '<label class="field"><span>Дата освидетельствования</span><input type="date" data-k="date"></label>' +
+      '<label class="check"><input type="checkbox" data-k="designer"> Вызвать также авторский надзор (проектировщика)</label>';
+    $('[data-k=date]', d).value = def;
+    openDialog('Уведомление о вызове на освидетельствование', d, ['spacer', { label: 'Отмена', onClick: closeDialog }, {
+      label: 'Сформировать', cls: 'btn-primary', onClick: () => {
+        const o = { date: $('[data-k=date]', d).value, designer: $('[data-k=designer]', d).checked };
+        makeDoc('Уведомление о вызове ' + (acts.length === 1 ? acts[0].type + ' № ' + C.actNumber(P, acts[0]) : 'на освидетельствование (' + acts.length + ')'), () => IDPdf.noticeDoc(P, acts, o));
+      }
+    }]);
+  }
   function makeAct(a) {
     if (!a.type) { toast('У акта не указан тип'); return; }
     makeDoc(actFileName(a), () => IDPdf.actDoc(P, a));

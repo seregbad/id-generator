@@ -147,6 +147,8 @@
         out = table({ table: { widths: ws, body: [cols.map(c => c)] }, layout: { hLineWidth: () => 0 } }, nst, avail);
       }
       else if (node.image) out = image(node, nst);
+      // линия (canvas) — нижняя граница пустого абзаца
+      else if (node.canvas) out = '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="000000"/></w:pBdr><w:spacing w:before="0" w:after="120"/><w:rPr><w:sz w:val="4"/></w:rPr></w:pPr></w:p>';
       else if (node.ul || node.ol) out = (node.ul || node.ol).map((x, i) => para(runs((node.ol ? (i + 1) + '. ' : '• '), nst) + runs(typeof x === 'object' ? x.text : x, nst), nst, null)).join('');
       else if (node.text !== undefined) out = para(runs(node.text, nst), nst, node);
       else out = '';

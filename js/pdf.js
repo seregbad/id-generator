@@ -217,7 +217,61 @@
     out.push(...signBlock(T.r3, C.shortName(rSc && rSc.fullName), sg(rSc)));
     out.push(...signBlock(T.r4, C.shortName(rAn && rAn.fullName), sg(rAn)));
     out.push(...signBlock(F.r5, C.shortName(rExec && rExec.fullName), sg(rExec)));
-    return groups(out);
+    return groups(out).concat(v.registry ? registryPage(p, a, v, rCust, rBuild, sg) : []);
+  }
+  // уведомление о готовности работ к освидетельствованию (вызов представителей) — по одному или нескольким актам
+  function noticeDoc(p, acts, opts) {
+    opts = opts || {};
+    const st = p.settings, P = C.parties(p);
+    const v0 = C.actView(p, acts[0]);
+    const exec = C.orgByKey(p, v0.executorKey) || P.builder || {};
+    const rCust = v0.reps[0], rBuild = v0.reps[1], rAn = v0.reps[3];
+    const when = opts.date || acts.map(a => a.actDate || a.end).filter(Boolean).sort()[0] || '';
+    const rows = acts.map((a, i) => { const v = C.actView(p, a); return [{ text: String(i + 1), alignment: 'center' }, v.name || '—', { text: a.type + ' № ' + v.number, alignment: 'center' }, { text: C.fmtDate(a.start) + (a.end && a.end !== a.start ? ' – ' + C.fmtDate(a.end) : ''), alignment: 'center' }]; });
+    const to = [
+      'Застройщику (техническому заказчику): ' + s(P.customer && P.customer.name),
+      rCust ? 'Представителю по вопросам строительного контроля: ' + [s(rCust.position), s(rCust.fullName)].filter(Boolean).join(' ') : '',
+      opts.designer && P.designer ? 'Лицу, осуществляющему подготовку проектной документации (авторский надзор): ' + s(P.designer.name) + (rAn ? ', ' + s(rAn.fullName) : '') : ''
+    ].filter(Boolean);
+    return doc([
+      { text: s(exec.name), bold: true, alignment: 'center', fontSize: 11 },
+      { text: [C.s(exec.address), exec.inn ? 'ИНН ' + exec.inn : '', exec.phone ? s(exec.phone) : ''].filter(Boolean).join(', '), alignment: 'center', fontSize: 8.5, margin: [0, 2, 0, 0] },
+      { canvas: [{ type: 'line', x1: 0, y1: 4, x2: 499, y2: 4, lineWidth: 0.8 }], margin: [0, 2, 0, 8] },
+      { columns: [{ width: '45%', text: 'Исх. № ________ от ' + C.fmtDate(C.todayISO()) }, { width: '*', stack: to.map(t => ({ text: t, margin: [0, 0, 0, 3] })) }], columnGap: 20 },
+      { text: 'УВЕДОМЛЕНИЕ', bold: true, alignment: 'center', fontSize: 12, margin: [0, 18, 0, 0] },
+      { text: 'о готовности работ к освидетельствованию и вызове представителей', bold: true, alignment: 'center', margin: [0, 0, 0, 10] },
+      { text: s(exec.name) + ' сообщает, что на объекте «' + s(st.objectName) + '»' + (st.address ? ' по адресу: ' + s(st.address) : '') + (st.contractNo ? ' (договор № ' + s(st.contractNo) + (st.contractDate ? ' от ' + C.fmtDate(st.contractDate) : '') + ')' : '') + ' завершены и готовы к освидетельствованию следующие работы:', alignment: 'justify', lineHeight: 1.2 },
+      { table: { headerRows: 1, widths: [22, '*', 90, 110], body: [head(['№', 'Наименование работ (конструкций)', 'Акт', 'Сроки выполнения'], 8)].concat(rows) }, layout: GRID, fontSize: 9, margin: [0, 8, 0, 8] },
+      { text: 'Просим направить уполномоченных представителей для освидетельствования работ и подписания актов ' + (when ? C.fmtDate(when) : '«___» ____________ 20__ г.') + ' в ____ ч ____ мин по адресу объекта. Исполнительная документация (исполнительные схемы, документы о качестве применённых материалов) будет предъявлена при освидетельствовании.', alignment: 'justify', lineHeight: 1.2 },
+      { text: 'В случае неявки представителей в указанное время просим сообщить о переносе освидетельствования.', alignment: 'justify', lineHeight: 1.2, margin: [0, 6, 0, 0] },
+      {
+        table: { widths: [200, 20, 110, 20, '*'], body: [
+          [{ text: s(rBuild && rBuild.position) || ' ', border: BB }, { text: '', border: NB }, Object.assign(signImg(p.settings.printSigns && rBuild && rBuild.sign, 100, 28), { border: BB }), { text: '', border: NB }, { text: C.shortName(rBuild && rBuild.fullName) || ' ', border: BB }],
+          [{ text: '(должность)', border: NB, fontSize: 6.5, italics: true, alignment: 'center' }, { text: '', border: NB }, { text: '(подпись)', border: NB, fontSize: 6.5, italics: true, alignment: 'center' }, { text: '', border: NB }, { text: '(расшифровка подписи)', border: NB, fontSize: 6.5, italics: true, alignment: 'center' }]
+        ] }, layout: UL, margin: [0, 30, 0, 0]
+      },
+      { text: 'Уведомление получил: ____________________  ____________________  «___» ____________ 20__ г.', fontSize: 9, margin: [0, 30, 0, 0] },
+      { text: '(подпись, расшифровка, дата)', fontSize: 6.5, italics: true, margin: [130, 1, 0, 0] }
+    ], { title: 'Уведомление о вызове на освидетельствование', fontSize: 10.5, margins: [56, 40, 40, 40] });
+  }
+  // приложение к акту: реестр документов о качестве (если их больше пяти)
+  function registryPage(p, a, v, rCust, rBuild, sg) {
+    const body = [head(['№ п/п', 'Наименование материала (изделия), марка, ГОСТ / ТУ', 'Изготовитель', 'Документ о качестве (вид, номер, дата, срок действия)', 'Документ поставки', 'Кол-во'], 7.5)];
+    v.materials.forEach((m, i) => body.push([
+      { text: String(i + 1), alignment: 'center' }, C.matName(m) + (m.gost ? ', ' + m.gost : ''), s(m.maker), C.matDocs(m) || '—',
+      [s(m.delivery), C.fmtDate(m.deliveryDate)].filter(Boolean).join(', '),
+      { text: (a.matQty && a.matQty[m.id] !== undefined && a.matQty[m.id] !== '' ? C.qty(a.matQty[m.id]) : C.qty(m.qty)) + ' ' + s(m.unit), alignment: 'center' }
+    ]));
+    return [
+      { text: 'Приложение к акту ' + a.type.toLowerCase().replace('аоср', 'освидетельствования скрытых работ').replace('аоок', 'освидетельствования ответственных конструкций') + ' № ' + s(v.number) + (v.date ? ' от ' + C.fmtDate(v.date) : ''), alignment: 'right', fontSize: 9, pageBreak: 'before' },
+      { text: 'РЕЕСТР', bold: true, alignment: 'center', fontSize: 12, margin: [0, 10, 0, 0] },
+      { text: 'документов о качестве применённых материалов (изделий)', bold: true, alignment: 'center' },
+      { text: 'Объект: ' + [p.settings.objectName, p.settings.address].filter(Boolean).join(', '), margin: [0, 6, 0, 0] },
+      { text: 'Работы: ' + s(v.name), margin: [0, 2, 0, 6] },
+      { table: { headerRows: 1, widths: [22, '*', 90, 150, 80, 46], body }, layout: GRID, fontSize: 8.5 },
+      ...signBlock('Представитель лица, осуществляющего строительство', C.shortName(rBuild && rBuild.fullName), sg(rBuild)),
+      ...signBlock('Представитель застройщика (технического заказчика) по вопросам строительного контроля', C.shortName(rCust && rCust.fullName), sg(rCust))
+    ];
   }
 
   const ATTACH_CAP = {
@@ -864,5 +918,5 @@
     });
   }
 
-  global.IDPdf = { FORMS, actDoc, actsDoc, registryDoc, jvkDoc, balanceDoc, ozhrDoc, smetaDoc, ks2Doc, ks3Doc, toBlob };
+  global.IDPdf = { FORMS, actDoc, actsDoc, noticeDoc, registryDoc, jvkDoc, balanceDoc, ozhrDoc, smetaDoc, ks2Doc, ks3Doc, toBlob };
 })(window);

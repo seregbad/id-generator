@@ -240,6 +240,13 @@
     });
     return found;
   }
+  // почему на дату акта нет представителя роли — подсказка для проверки и карточки акта
+  function repMissingReason(p, role, date) {
+    const same = p.people.filter(r => r.role === role);
+    if (!same.length) return 'в «Представителях» нет никого с ролью «' + role + '»';
+    const near = same.map(r => shortName(r.fullName) + ' — ' + (r.from && r.from > date ? 'действует с ' + fmtDate(r.from) : r.to && r.to < date ? 'действовал по ' + fmtDate(r.to) : 'не подходит по организации')).join('; ');
+    return 'на ' + fmtDate(date) + ' никто не действует (' + near + '). Поправьте даты «с/по» в «Представителях» или выберите представителя в карточке акта';
+  }
   // текущий представитель (для титула ОЖР): «по» пусто или ≥ сегодня
   function currentRep(p, role) {
     const t = todayISO();
@@ -323,24 +330,29 @@
     const rd = rdFor(p, a, w);
     const project = (rd.code ? 'шифр ' + rd.code : '') + (a.sheets ? (rd.code ? ', ' : '') + a.sheets : '');
     const docs = a.docs || (w ? s(w.docs) : '');
-    const reps = REP_ROLES.map(role => pickRep(p, role, date, executorKey));
+    // представитель, выбранный в карточке акта (a.rep0…a.rep4), важнее автоматического выбора по роли и дате
+    const reps = REP_ROLES.map((role, i) => (a['rep' + i] && p.people.find(r => r.id === a['rep' + i])) || pickRep(p, role, date, executorKey));
     const number = actNumber(p, a);
     const signers = reps.filter(Boolean).map(r => (s(r.position) + ' ' + shortName(r.fullName)).trim()).join('; ');
     const warnings = [];
     if (!a.type) warnings.push('не указан тип акта');
     if (!a.start || !a.end) warnings.push('не указаны даты работ');
     if (a.start && a.end && a.start > a.end) warnings.push('дата начала позже окончания');
-    if (!reps[0]) warnings.push('нет представителя СК Заказчика на дату акта');
-    if (!reps[1]) warnings.push('нет представителя Подрядчика на дату акта');
+    if (!reps[0]) warnings.push('нет представителя СК Заказчика: ' + repMissingReason(p, REP_ROLES[0], date));
+    if (!reps[1]) warnings.push('нет представителя Подрядчика: ' + repMissingReason(p, REP_ROLES[1], date));
     mats.forEach(m => { if (matExpired(m, date)) warnings.push('истёк документ: ' + matName(m)); });
+    // больше 5 документов о качестве — по форме 344/пр в п. 3 (АООК — п. 4) ссылка на реестр, реестр прикладывается к акту
+    const docCount = mats.reduce((n, m) => n + (m.doc1Type || m.doc1No ? 1 : 0) + (m.doc2Type || m.doc2No ? 1 : 0), 0);
+    const registry = (a.type === 'АОСР' || a.type === 'АООК') && st.matRegistry !== false && (docCount > 5 || a.forceRegistry);
+    const regRef = 'Материалы и изделия согласно реестру документов о качестве (приложение к настоящему акту, позиций: ' + mats.length + ', документов: ' + docCount + '), являющемуся неотъемлемой частью акта';
     return {
       act: a, work: w, number, date, executorKey, materials: mats,
-      name,
-      materialsText: mats.map(matText).filter(Boolean).join('; '),
+      name, registry, docCount,
+      materialsText: registry ? regRef : mats.map(matText).filter(Boolean).join('; '),
       norms: a.manualNorms || (w ? s(w.norms) : ''),
       next: a.manualNext || (w ? s(w.next) : ''),
       project, docs, projectCode: rd.code, projectDoc: rd.projectDoc, rdSource: rd.source,
-      attach: a.manualAttach || docs,
+      attach: (a.manualAttach || docs) + (registry && !/реестр документов о качестве/i.test(a.manualAttach || '') ? ((a.manualAttach || docs) ? '; ' : '') + 'реестр документов о качестве применённых материалов' : ''),
       copies: s(a.copies || st.copies),
       reps, signers,
       title: a.type ? a.type + ' № ' + number + ' - ' + name : '',
@@ -487,7 +499,7 @@
     customerOrg, builderOrg, designerOrg, partyWarnings, rdSection, rdFor,
     uid, s, pad2, parseDate, fmtDate, dateParts, todayISO, dle, round2, num, money, qty, lowerFirst, shortName,
     emptyProject, normalize,
-    orgByKey, orgByRole, keyByRole, orgLine, sroLine, personActLine, personOrgLine, pickRep, currentRep,
+    orgByKey, orgByRole, keyByRole, orgLine, sroLine, personActLine, personOrgLine, pickRep, currentRep, repMissingReason,
     matNo, matName, matLabel, matDocs, matText, matUntil, matExpired,
     workLabel, actNumber, actView, parties, smetaRow, smetaRows, smetaTotals,
     ksPeriodMode, ksItems, ksTotals, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
