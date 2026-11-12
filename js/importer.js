@@ -465,6 +465,40 @@
     return xml.replace(/<w:tab\/>/g, '\t').replace(/<\/w:tc>/g, '\t').replace(/<\/w:p>/g, '\n')
       .replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
   }
+  // таблицы Word: [[ячейки строки], …] на каждую таблицу (вложенные таблицы — как отдельные)
+  async function docxTables(buf) {
+    await UI.loadScript('vendor/jszip.min.js');
+    const zip = await JSZip.loadAsync(buf);
+    const f = zip.file('word/document.xml'); if (!f) return [];
+    const doc = new DOMParser().parseFromString(await f.async('string'), 'application/xml');
+    const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    const txt = el => Array.from(el.getElementsByTagNameNS(W, 'p')).map(p => Array.from(p.getElementsByTagNameNS(W, 't')).map(t => t.textContent).join('')).join(' ').replace(/\s+/g, ' ').trim();
+    return Array.from(doc.getElementsByTagNameNS(W, 'tbl')).map(tbl =>
+      Array.from(tbl.children).filter(x => x.localName === 'tr').map(tr => Array.from(tr.children).filter(x => x.localName === 'tc').map(txt)));
+  }
+  // позиции из таблицы «Наименование | Кол-во | Ед. | Цена | Сумма» (столбцы — по заголовку, в любом порядке)
+  function tablesEstimate(tables) {
+    const num = v => { const s = String(v || '').replace(/[\s ]/g, '').replace(',', '.'); return s && isFinite(+s) ? +s : null; };
+    const out = [];
+    (tables || []).forEach(rows => {
+      const hi = rows.findIndex(r => r.some(c => /наименован|товары|работ/i.test(c)) && r.some(c => /цена|стоимост/i.test(c)));
+      if (hi < 0) return;
+      const h = rows[hi].map(c => c.toLowerCase());
+      const col = re => h.findIndex(c => re.test(c));
+      const iName = col(/наименован|товары|работ/), iQty = col(/кол/), iUnit = col(/^ед/), iPrice = col(/цена/), iSum = col(/сумма|стоимость/);
+      if (iName < 0 || (iPrice < 0 && iSum < 0)) return;
+      rows.slice(hi + 1).forEach(r => {
+        const name = str(r[iName]);
+        if (!name || TOTAL_RE.test(name) || ADVANCE_RE.test(name) || /^\d+$/.test(name)) return;
+        const qty = iQty >= 0 ? num(r[iQty]) : null, price = iPrice >= 0 ? num(r[iPrice]) : null, sum = iSum >= 0 ? num(r[iSum]) : null;
+        const q = qty !== null ? qty : 1;
+        const p = price !== null ? price : (sum !== null && q ? Math.round(sum / q * 100) / 100 : null);
+        if (p === null) return;
+        out.push({ name, unit: iUnit >= 0 ? normUnit(r[iUnit]) : '', qty: String(q), price_work: String(p), price_mat: '' });
+      });
+    });
+    return out;
+  }
   async function readWorkbook(buf) {
     await UI.loadScript('vendor/xlsx.full.min.js');
     return XLSX.read(buf, { type: 'array' });
@@ -554,7 +588,7 @@
     if (/^(м3|м\^3|куб\.?м|м³)$/.test(l)) return 'м³';
     if (/^(пог\.?м|п\.?м|пм|м\.?п)$/.test(l)) return 'пог. м';
     if (/^шт/.test(l)) return 'шт';
-    return t;
+    return C.unitNorm(t);
   }
   // соседние куски одного числа в строке: «2» + «527,753» → «2 527,753»; «1 600,» + «00» → «1 600,00»
   function mergeNumbers(items) {
@@ -893,6 +927,51 @@
     return out.filter(o => o.name && (o.inn || o.ogrn || o.type === 'ФЛ'));
   }
 
+  // ---------- дополнительное соглашение к договору ----------
+  // null — это не ДС; иначе {no, date, contract_no, subject, priceMode, amount, newPrice, startDate, endDate}
+  function parseSupplement(text) {
+    const t = fixOcr(String(text || '')).replace(/ /g, ' ');
+    const hd = t.slice(0, 800);
+    // заголовок с начала строки, а не «…изменяется дополнительными соглашениями…» в тексте договора
+    const m = /(?:^|\n)\s*дополнительное\s+соглашение(?![а-яё])\s*(?:№\s*([0-9A-Za-zА-Яа-яЁё\/.\-]+))?/i.exec(hd);
+    if (!m) return null;
+    const DATE = '(\\d{1,2}[.\\/]\\d{1,2}[.\\/]\\d{2,4}|«?\\s*\\d{1,2}\\s*»?\\s+[а-яё]+\\s+\\d{4})';
+    const NUM = '(\\d{1,3}(?:\\s\\d{3})*(?:[.,]\\s?\\d{1,2})?)';
+    const n = v => +String(v).replace(/\s/g, '').replace(',', '.');
+    const d = { no: m[1] || '', date: '', contract_no: '', subject: '', priceMode: '', amount: '', newPrice: '', startDate: '', endDate: '' };
+    // дата ДС — первая дата после заголовка (обычно «г. Москва   12.05.2026»), но не дата договора «к договору № … от …»
+    const after = t.slice(m.index + m[0].length, m.index + m[0].length + 400);
+    const cn = new RegExp('к\\s+договору[^№\\n]{0,40}№\\s*([^\\s,]+)(?:\\s+от\\s+' + DATE + ')?', 'i').exec(after);
+    if (cn) d.contract_no = cn[1];
+    const rest = cn ? after.slice(0, cn.index) + ' '.repeat(cn[0].length) + after.slice(cn.index + cn[0].length) : after;
+    const dt = new RegExp(DATE).exec(rest);
+    if (dt) d.date = iso(dt[1]);
+    // цена: «увеличивается на …», «уменьшается на …», «стоимость дополнительных работ составляет …», «цена договора составляет …»
+    const inc = new RegExp('увеличива[а-яё]*[\\s\\S]{0,160}?на\\s*(?:сумму\\s*)?' + NUM, 'i').exec(t);
+    const dec = new RegExp('уменьша[а-яё]*[\\s\\S]{0,160}?на\\s*(?:сумму\\s*)?' + NUM, 'i').exec(t);
+    const add = new RegExp('стоимость\\s+дополнительн[а-яё]*\\s+работ[\\s\\S]{0,160}?составля[а-яё]*\\s*:?\\s*' + NUM, 'i').exec(t);
+    // «Общая стоимость составляет …», «общая стоимость работ (цена договора) составляет …», «Общая сумма договора (руб.): …»
+    const np = new RegExp('(?:цена\\s+договора|общая\\s+стоимость(?:\\s+работ)?|стоимость\\s+договора)[\\s\\S]{0,200}?(?:составля[а-яё]*|составит|в\\s+размере)\\s*:?\\s*' + NUM, 'i').exec(t)
+      || new RegExp('общая\\s+сумма\\s+договора[^\\d]{0,40}' + NUM, 'i').exec(t);
+    // ДС на отдельные работы: «…оплату … в сумме 140 000 …» или «Итого 140 000,00» по расчёту
+    const sum = new RegExp('(?:стоимост[а-яё]*[^.]{0,80}?в\\s+сумме|в\\s+сумме)\\s*' + NUM, 'i').exec(t) || new RegExp('(?:^|\\n)\\s*итого\\s*:?\\s*' + NUM, 'i').exec(t);
+    if (inc || dec || add) d.amount = String(inc ? n(inc[1]) : add ? n(add[1]) : -n(dec[1]));
+    else if (np) { d.priceMode = 'new'; d.newPrice = String(n(np[1])); }
+    else if (sum) d.amount = String(n(sum[1]));
+    // сроки: «срок … с … по …» или «срок … до …»
+    const term = new RegExp('срок[\\s\\S]{0,160}?с\\s*' + DATE + '[\\s\\S]{0,20}?(?:по|до)\\s*' + DATE, 'i').exec(t);
+    if (term) { d.startDate = iso(term[1]); d.endDate = iso(term[2]); }
+    else {
+      // «срок … до …» или «Монтажные работы по текущему договору – до «25» декабря 2026 г.»
+      const till = new RegExp('срок[\\s\\S]{0,160}?(?:до|по)\\s*' + DATE, 'i').exec(t) || new RegExp('работ[а-яё]*[^\\n]{0,80}?\\sдо\\s*' + DATE, 'i').exec(t);
+      if (till) d.endDate = iso(till[1]);
+    }
+    const sj = /(?:на\s+выполнение|о\s+выполнении|о\s+проведении|выполнить)\s+((?:дополнительн[а-яё]*\s+)?работ[^\n.;]{0,100})/i.exec(t) || /(дополнительн[а-яё]*\s+работ[а-яё]*\s+по\s+[^\n.;]{3,100})/i.exec(t)
+      || /договорились\s+(?:о|об)\s+(изменении\s+[^\n.;]{0,40}?(?:стоимости|цены|сроков)[^\n.;]{0,20}?)(?:\s+на\s+объекте|[.;\n])/i.exec(t);
+    if (sj) d.subject = str(sj[1]).replace(/\s+на\s+объекте.*$/i, '').replace(/,?\s*согласно.*$/i, '').replace(/[,\s]+$/, '').slice(0, 120);
+    return d;
+  }
+
   // ---------- офлайн: поиск по шаблонам в тексте ----------
   function offlineParse(text, layout, fname) {
     const r = emptyResult();
@@ -900,6 +979,14 @@
     const t = text.replace(/ /g, ' ');
     const head = t.slice(0, 1500).toLowerCase();
     const head3 = t.slice(0, 4000).toLowerCase();
+    // доп. соглашение — свой разбор: реквизиты ДС, изменение цены и сроков, таблица дополнительных работ
+    const sup = parseSupplement(text);
+    if (sup) {
+      r.doc_kind = 'supplement'; r.supplement = sup;
+      r.summary = 'Доп. соглашение № ' + (sup.no || '—') + (sup.date ? ' от ' + C.fmtDate(sup.date) : '');
+      if (layout) invoiceTable(layout).filter(row => !ADVANCE_RE.test(row.name)).forEach(row => r.estimate.push({ name: row.name, unit: row.unit, qty: String(row.qty), price_work: String(row.price), price_mat: '' }));
+      return r;
+    }
     const fn = fromFileName(fname || '');
     const fnLow = (fname || '').toLowerCase();
     // договор с приложением «Расчёт стоимости работ» — всё же договор: его заголовок в самом начале
@@ -1344,6 +1431,32 @@
     return p;
   }
 
+  // позиция сметы, которой соответствует строка ДС: то же наименование или почти то же (совпадает ≥ 80 % слов).
+  // Новые позиции этого же ДС не считаем — их ДС не «изменяет»
+  // сходство наименований 0…1: по буквам (пары соседних символов), без пробелов и знаков; латинские B, C, E… = русские
+  const LAT = { a: 'а', b: 'в', c: 'с', e: 'е', h: 'н', k: 'к', m: 'м', o: 'о', p: 'р', t: 'т', x: 'х', y: 'у' };
+  const compact = t => norm(t).replace(/[a-z]/g, ch => LAT[ch] || ch).replace(/[^0-9а-яa-z]+/g, '');
+  function nameSim(a, b) {
+    const x = compact(a), y = compact(b);
+    if (!x || !y) return 0;
+    if (x === y) return 1;
+    const big = s => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const k = s.substr(i, 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
+    const bx = big(x), by = big(y);
+    let common = 0; bx.forEach((n, k) => { common += Math.min(n, by.get(k) || 0); });
+    return 2 * common / (x.length - 1 + y.length - 1);
+  }
+  // строки ДС ↔ позиции сметы: лучшие пары первыми, каждая позиция сметы — не больше одной строки ДС.
+  // Новые позиции этого же ДС и исключённые не берём
+  function matchSmetaAll(P, names, dsId) {
+    const cand = P.smeta.filter(r => r.name && r.dsId !== dsId && !(r.excludedBy && C.dsById(P, r.excludedBy)));
+    const pairs = [];
+    names.forEach((n, i) => cand.forEach(r => { const k = nameSim(n, r.name); if (k >= 0.75) pairs.push({ i, r, k }); }));
+    pairs.sort((a, b) => b.k - a.k);
+    const res = new Map(), used = new Set();
+    pairs.forEach(({ i, r }) => { if (!res.has(i) && !used.has(r)) { res.set(i, r); used.add(r); } });
+    return res;
+  }
+
   function buildProposals(res, source) {
     const P = A.project;
     const out = [];
@@ -1437,13 +1550,88 @@
     });
     // смета
     const est = (res.estimate || []).filter(r => r.name);
-    if (est.length) {
+    const sup = res.supplement;
+    if (sup) {
+      // доп. соглашение: завести ДС (или дополнить уже заведённое с тем же номером) и его позиции сметы
+      const ex = P.supplements.find(x => sup.no && str(x.no) === str(sup.no));
+      const dsId = ex ? ex.id : C.uid(); // id заранее — на него ссылаются изменения позиций
+      // цены в ДС — с НДС; если смета ведётся без НДС, переводим, иначе «изменится» каждая позиция
+      const vat = C.num(st.vat), toSmeta = v => v === '' || !C.vatTop(P) ? v : C.round2(v / (1 + vat));
+      const all = est.map(r => ({ id: C.uid(), name: str(r.name), unit: str(r.unit), qty: numStr(r.qty), priceWork: toSmeta(numStr(r.price_work)), priceMat: toSmeta(numStr(r.price_mat)) }));
+      // строки ДС, которые есть в смете, — это изменение существующих позиций, а не новые работы
+      const changes = [];
+      const matched = matchSmetaAll(P, all.map(r => r.name), dsId);
+      const rows = all.filter((r, i) => {
+        const m = matched.get(i);
+        if (!m) return true;
+        const oldUnit = C.num(m.priceWork) + C.num(m.priceMat), newUnit = C.num(r.priceWork) + C.num(r.priceMat);
+        const qtyCh = r.qty !== '' && Math.abs(C.num(r.qty) - C.num(m.qty)) > 1e-6;
+        const priceCh = newUnit && Math.abs(newUnit - oldUnit) > 0.005;
+        if (qtyCh || priceCh) changes.push({ m, r, qtyCh, priceCh, newUnit });
+        return false; // совпала и не изменилась — в ДС просто повторена позиция договора
+      });
+      const data = { no: str(sup.no), date: iso(sup.date), subject: str(sup.subject), priceMode: sup.priceMode || '', amount: str(sup.amount), newPrice: str(sup.newPrice), startDate: iso(sup.startDate), endDate: iso(sup.endDate) };
+      const labels = { no: 'Номер ДС', date: 'Дата ДС', subject: 'Предмет', amount: 'Изменение цены, руб. с НДС (уменьшение — минус)', newPrice: 'Новая цена основных работ, руб. с НДС (доп. работы по другим ДС прибавятся)', startDate: 'Новое начало работ', endDate: 'Новое окончание работ' };
+      const warn = sup.contract_no && st.contractNo && norm(sup.contract_no) !== norm(st.contractNo) ? ' — внимание: ДС к договору № ' + sup.contract_no + ', а в проекте № ' + st.contractNo : '';
+      out.push({
+        kind: 'Доп. соглашение', title: (ex ? 'Обновить ' : 'Добавить ') + 'доп. соглашение № ' + (sup.no || '—') + (sup.date ? ' от ' + C.fmtDate(iso(sup.date)) : '') +
+          (all.length ? ' (строк в расчёте: ' + all.length + ', совпали со сметой: ' + matched.size + ', изменились: ' + changes.length + ')' : ' (таблица работ не найдена)') + warn, checked: true, data,
+        fields: Object.keys(labels).filter(k => k !== (data.priceMode ? 'amount' : 'newPrice')).map(k => F(k, labels[k], /Date$|^date$/.test(k) ? 'date' : 'text')),
+        apply: d => {
+          const v = Object.assign({}, d, { amount: d.amount === '' ? '' : C.num(d.amount), newPrice: d.newPrice === '' ? '' : C.num(d.newPrice) });
+          if (ex) Object.keys(v).forEach(k => { if (str(v[k]) !== '') ex[k] = v[k]; });
+          else P.supplements.push(Object.assign({ id: dsId }, v));
+        }
+      });
+      const lblDs = 'ДС № ' + (sup.no || '—');
+      const needDs = () => C.dsById(P, dsId) ? '' : 'отметьте и само доп. соглашение';
+      // новые работы по ДС — отдельным пунктом (можно снять галочку, если это переименованные позиции договора)
+      if (rows.length) out.push({
+        kind: 'Смета', title: 'Добавить в смету новые позиции по ' + lblDs + ': ' + rows.length, checked: true, data: {},
+        fields: [], valid: needDs,
+        list: rows.map(r => r.name + ' — ' + C.qty(r.qty) + ' ' + r.unit + ' × ' + C.money(C.num(r.priceWork) + C.num(r.priceMat))),
+        apply: () => rows.forEach(r => P.smeta.push(Object.assign(r, { dsId })))
+      });
+      // изменения существующих позиций и позиции, которых нет в новой редакции расчёта, — прикрепляются к позициям сметы;
+      // принимаются там кнопкой «Применить» (по одной или все сразу), с показом «было → стало»
+      const pend = changes.map(({ m, r, qtyCh, priceCh, newUnit }) => {
+        if (qtyCh && !C.num(r.qty)) return { m, act: 'ex', note: 'в ДС количество 0', what: 'исключить' };
+        // новая цена за единицу делится между работой и материалом в прежней пропорции (материала нет — вся в работы)
+        const oldUnit = C.num(m.priceWork) + C.num(m.priceMat);
+        const pw = priceCh ? (oldUnit ? C.round2(C.num(m.priceWork) * newUnit / oldUnit) : newUnit) : m.priceWork;
+        const pm = priceCh ? (C.num(m.priceMat) ? C.round2(newUnit - pw) : m.priceMat) : m.priceMat;
+        const what = [qtyCh ? 'кол-во ' + C.qty(m.qty) + ' → ' + C.qty(r.qty) + ' ' + (m.unit || '') : '', priceCh ? 'цена ' + C.money(oldUnit) + ' → ' + C.money(newUnit) : ''].filter(Boolean).join('; ');
+        return { m, act: 'ch', to: { qty: qtyCh ? r.qty : m.qty, priceWork: pw, priceMat: pm }, what, note: compact(m.name) !== compact(r.name) ? 'в ДС: «' + r.name.slice(0, 90) + (r.name.length > 90 ? '…' : '') + '»' : '' };
+      });
+      // ДС с новой редакцией всего расчёта (совпала хотя бы половина позиций договора): позиций договора, которых в нём нет, возможно, больше нет
+      const contractRows = P.smeta.filter(r => r.name && !(r.dsId && C.dsById(P, r.dsId)) && !(r.excludedBy && C.dsById(P, r.excludedBy)));
+      const usedRows = new Set(matched.values());
+      if (contractRows.length && usedRows.size >= contractRows.length / 2) contractRows.filter(r => !usedRows.has(r)).forEach(m => pend.push({ m, act: 'ex', note: 'нет в расчёте ДС', what: 'нет в расчёте ДС — исключить?' }));
+      if (pend.length) out.push({
+        kind: 'Смета', title: 'Изменения позиций сметы по ' + lblDs + ': ' + pend.length + ' — появятся у позиций в «Смете», там их примете кнопкой «Применить» (по одной или все сразу)', checked: true,
+        data: {}, fields: [], valid: needDs,
+        list: pend.map(x => x.m.name + ' — ' + x.what),
+        apply: () => pend.forEach(x => {
+          const rec = { dsId, act: x.act, note: x.note };
+          if (x.act === 'ch') rec.to = { qty: numStr(x.to.qty), priceWork: numStr(x.to.priceWork), priceMat: numStr(x.to.priceMat) };
+          // повторная загрузка того же ДС заменяет прежнее непринятое изменение
+          x.m.pendingDs = (x.m.pendingDs || []).filter(y => y.dsId !== dsId).concat([rec]);
+        })
+      });
+    } else if (est.length) {
       const rows = est.map(r => ({ id: C.uid(), name: str(r.name), unit: str(r.unit), qty: numStr(r.qty), priceWork: numStr(r.price_work), priceMat: numStr(r.price_mat) }));
+      const fields = P.smeta.length ? [F('replace', 'Заменить текущую смету, а не дописать', 'check')] : [];
+      // если в проекте есть доп. соглашения — можно сразу указать, к чему относятся позиции
+      if (P.supplements.length) fields.push(Object.assign(F('dsId', 'Основание позиций', 'pick'), { opts: [{ v: '', l: 'Основной договор' }].concat(C.dsList(P).map(x => ({ v: x.id, l: 'ДС № ' + (x.no || '—') + (x.date ? ' от ' + C.fmtDate(x.date) : '') }))) }));
       out.push({
         kind: 'Смета', title: 'Добавить в смету позиций: ' + rows.length + (P.smeta.length ? ' (в смете уже ' + P.smeta.length + ')' : ''), checked: true,
-        data: { replace: P.smeta.length ? '' : 1 }, fields: P.smeta.length ? [F('replace', 'Заменить текущую смету, а не дописать', 'check')] : [],
+        data: { replace: P.smeta.length ? '' : 1, dsId: '' }, fields,
         list: rows.map(r => r.name + ' — ' + C.qty(r.qty) + ' ' + r.unit + ' × ' + C.money(C.num(r.priceWork) + C.num(r.priceMat))),
-        apply: d => { if (d.replace) P.smeta.splice(0, P.smeta.length); rows.forEach(r => P.smeta.push(r)); }
+        apply: d => {
+          // «заменить» — только позиции того же основания, остальные разделы не трогаем
+          if (d.replace) for (let i = P.smeta.length - 1; i >= 0; i--) if ((P.smeta[i].dsId || '') === (d.dsId || '')) P.smeta.splice(i, 1);
+          rows.forEach(r => P.smeta.push(d.dsId ? Object.assign(r, { dsId: d.dsId }) : r));
+        }
       });
     }
     out.forEach(p => { p.source = source; p.id = C.uid(); applyLearned(p); p.orig = Object.assign({}, p.data); });
@@ -1515,7 +1703,7 @@
       } else if (['pdf', 'docx', 'txt', 'jpg', 'jpeg', 'png', 'webp', 'gif'].includes(e)) {
         let text = '', layout = null;
         if (e === 'pdf') { const r = await pdfText(buf); text = r.text; layout = r.layout; item.scan = looksScanned(text, r.pages); }
-        else if (e === 'docx') text = await docxText(buf);
+        else if (e === 'docx') { text = await docxText(buf); try { item.docxRows = tablesEstimate(await docxTables(buf)); } catch (err) { item.docxRows = []; } }
         else if (e === 'txt') text = new TextDecoder().decode(buf);
         else item.scan = true;
         let res;
@@ -1523,6 +1711,9 @@
           item.status = 'Распознаю через ИИ…'; draw();
           res = await aiParse(file, buf, text);
           if (text && text.trim()) item.rawText = text;
+          // ИИ не знает про доп. соглашения: реквизиты ДС берём разбором текста, а договорные поля не трогаем
+          const sup = text && parseSupplement(text);
+          if (sup) { res.doc_kind = 'supplement'; res.supplement = sup; res.contract = emptyResult().contract; res.summary = 'Доп. соглашение № ' + (sup.no || '—') + (sup.date ? ' от ' + C.fmtDate(sup.date) : ''); }
           item.via = 'ИИ';
         } else {
           if (item.scan) {
@@ -1537,6 +1728,11 @@
           } else item.via = 'офлайн';
           item.rawText = text;
           res = offlineParse(text, layout, file.name);
+        }
+        // Word: позиции из таблиц документа (расчёт стоимости в договоре / ДС / акте), если по тексту не нашлись
+        if (item.docxRows && item.docxRows.length && !(res.estimate || []).length && ['contract', 'act', 'supplement', 'estimate'].includes(res.doc_kind)) {
+          res.estimate = item.docxRows;
+          if (res.doc_kind !== 'supplement') res.summary = (res.summary || 'Документ') + ' · позиций в смету: ' + item.docxRows.length;
         }
         item.res = res;
         item.proposals = buildProposals(res, file.name);
@@ -1745,6 +1941,14 @@
         w.classList.add('wide');
         input = document.createElement('select');
         input.innerHTML = '<option value="">+ Новый материал</option>' + P.materials.map(m => '<option value="' + esc(m.id) + '"' + (m.id === v ? ' selected' : '') + '>Дописать к ' + esc(C.matLabel(P, m)) + '</option>').join('');
+        input.addEventListener('change', () => { p.data[f.k] = input.value; });
+        w.appendChild(input); body.appendChild(w); return;
+      }
+      // выбор из готового списка {v, l} (например, основание позиций сметы: договор / ДС)
+      if (f.t === 'pick') {
+        w.classList.add('wide');
+        input = document.createElement('select');
+        input.innerHTML = (f.opts || []).map(o => '<option value="' + esc(o.v) + '"' + (o.v === v ? ' selected' : '') + '>' + esc(o.l) + '</option>').join('');
         input.addEventListener('change', () => { p.data[f.k] = input.value; });
         w.appendChild(input); body.appendChild(w); return;
       }
@@ -1983,7 +2187,7 @@
         if (p.done) return;
         p.fields.forEach(f => {
           const v = str(p.data[f.k]);
-          if (!v || f.t === 'matTarget' || f.t === 'check' || f.t === 'orgRole') return;
+          if (!v || f.t === 'matTarget' || f.t === 'check' || f.t === 'orgRole' || f.t === 'pick') return;
           if (f.t === 'date') { const d = C.fmtDate(v); if (d) vals.push({ v: d, l: f.l }); return; }
           if (v.length >= 3) vals.push({ v, l: f.l });
         });

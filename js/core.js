@@ -167,7 +167,7 @@
     out.lists = Object.assign({}, base.lists, p.lists || {});
     FIXED_LISTS.forEach(k => { out.lists[k] = DEFAULT_LISTS[k].slice(); });
     ['sections', 'docTypes', 'units'].forEach(k => { if (!Array.isArray(out.lists[k]) || !out.lists[k].length) out.lists[k] = DEFAULT_LISTS[k].slice(); });
-    ['orgs', 'people', 'materials', 'works', 'acts', 'smeta', 'rdSections', 'ksHistory'].forEach(k => {
+    ['orgs', 'people', 'materials', 'works', 'acts', 'smeta', 'rdSections', 'ksHistory', 'supplements'].forEach(k => {
       if (!Array.isArray(out[k])) out[k] = [];
       out[k].forEach(r => { if (!r.id) r.id = uid(); });
     });
@@ -397,7 +397,71 @@
     const q = num(r.qty), w = num(r.priceWork), m = worksOnly ? 0 : num(r.priceMat);
     return { total: round2(q * (w + m)), work: round2(q * w), mat: round2(q * m), unitPrice: w + m };
   }
-  const smetaRows = (p, worksOnly) => p.smeta.filter(r => r.name && (!worksOnly || num(r.priceWork)));
+  // ---------- дополнительные соглашения ----------
+  // ДС: {id, no, date, subject, priceMode: 'delta' | 'new', amount (±, с НДС), newPrice, startDate, endDate, note}
+  const dsList = p => (p.supplements || []).slice().sort((a, b) => (s(a.date) || '9999').localeCompare(s(b.date) || '9999') || String(a.no).localeCompare(String(b.no), 'ru', { numeric: true }));
+  const dsById = (p, id) => id ? (p.supplements || []).find(d => d.id === id) || null : null;
+  // «ДС № 1 от 01.10.2026» — без падежа, годится в любую фразу; в документах — «по дополнительному соглашению № …»
+  const dsLabel = d => d ? 'ДС № ' + s(d.no || '—') + (d.date ? ' от ' + fmtDate(d.date) : '') : '';
+  // единицы измерения в одном виде: «усл», «Услуга», «усл.» → «услуга»; «компл», «комплект» → «компл.»; «м2» → «м²»…
+  function unitNorm(u) {
+    const t = s(u).replace(/\s+/g, ' ').trim();
+    const l = t.toLowerCase().replace(/[\s.]/g, '');
+    if (!l) return '';
+    if (/^(усл|услуга|услуги)$/.test(l)) return 'услуга';
+    if (/^(компл|комплект|кмпл|к-т|кт)$/.test(l)) return 'компл.';
+    if (/^(шт|штука|штук|штуки)$/.test(l)) return 'шт';
+    if (/^(т|тн|тонна|тонн|тонны)$/.test(l)) return 'т';
+    if (/^(м2|м\^2|квм|м²)$/.test(l)) return 'м²';
+    if (/^(м3|м\^3|кубм|м³)$/.test(l)) return 'м³';
+    if (/^(пм|погм|мп)$/.test(l)) return 'пог. м';
+    if (/^(м|метр)$/.test(l)) return 'м';
+    if (/^(кг|килограмм)$/.test(l)) return 'кг';
+    return t;
+  }
+  // сумма ДС по его позициям в смете (с НДС) — если в самом ДС сумма не указана
+  function dsRowsGross(p, d) {
+    let sum = 0;
+    p.smeta.forEach(r => {
+      if (r.name && r.dsId === d.id && r.excludedBy !== d.id) sum += smetaRow(r).total;
+      if (r.name && r.excludedBy === d.id) sum -= smetaRow(r).total;
+      (r.changes || []).forEach(ch => { if (ch.dsId === d.id) sum += smetaRow(ch.to).total - smetaRow(ch.from).total; });
+    });
+    return vatSplit(p, round2(sum)).gross;
+  }
+  // цена договора с учётом ДС (с НДС), по порядку дат. Цена = основные работы + доп. работы по ДС:
+  //  «изменение на сумму» — к доп. работам (пусто — по позициям этого ДС в смете);
+  //  «новая цена основных работ» (priceMode 'new') — заменяет цену основных работ, доп. работы по другим ДС сохраняются;
+  //  «новая общая цена» ('total') — заменяет всё (в неё уже вошли прежние ДС)
+  function contractPriceNow(p) {
+    const start = num(p.settings.contractPrice);
+    let base = start, extra = 0;
+    const steps = dsList(p).map(d => {
+      const before = base + extra;
+      if (d.priceMode === 'new' && s(d.newPrice) !== '') base = num(d.newPrice);
+      else if (d.priceMode === 'total' && s(d.newPrice) !== '') { base = num(d.newPrice); extra = 0; }
+      else extra = round2(extra + (s(d.amount) !== '' ? num(d.amount) : dsRowsGross(p, d)));
+      const after = round2(base + extra);
+      return { ds: d, delta: round2(after - before), after };
+    });
+    return { base: start, mainNow: round2(base), total: round2(base + extra), steps, hasDs: steps.length > 0 };
+  }
+  // сроки работ с учётом ДС (последнее ДС, где срок указан)
+  function workDates(p) {
+    let start = p.settings.startDate || '', end = p.settings.endDate || '';
+    dsList(p).forEach(d => { if (d.startDate) start = d.startDate; if (d.endDate) end = d.endDate; });
+    return { start, end };
+  }
+  // позиции сметы: исключённые по ДС не участвуют; порядок — договор, затем ДС по датам (сквозная нумерация)
+  function smetaGroups(p) {
+    const ds = dsList(p), ids = ds.map(d => d.id);
+    // исключена только по существующему ДС (если ДС удалили — позиция снова действует)
+    const rows = p.smeta.filter(r => r.name && !(r.excludedBy && ids.includes(r.excludedBy)));
+    const main = rows.filter(r => !r.dsId || !ids.includes(r.dsId));
+    return [{ ds: null, rows: main }].concat(ds.map(d => ({ ds: d, rows: rows.filter(r => r.dsId === d.id) })));
+  }
+  const smetaOrdered = p => smetaGroups(p).flatMap(g => g.rows);
+  const smetaRows = (p, worksOnly) => smetaOrdered(p).filter(r => !worksOnly || num(r.priceWork));
   // НДС: цены в смете с НДС (по умолчанию, как в договорах «в т.ч. НДС») или без НДС — НДС сверху (ks.vatMode = 'top').
   // total — сумма в ценах сметы; net — без НДС; vatSum — НДС; gross — с НДС
   const vatTop = p => p.ks && p.ks.vatMode === 'top';
@@ -420,11 +484,20 @@
   // если у позиций сметы заполнено «выполнено в этом периоде» (qtyNow) — КС-2 только по ним и на этот объём;
   // иначе — на всю смету, как раньше
   const ksPeriodMode = p => p.smeta.some(r => r.name && s(r.qtyNow) !== '');
+  // область КС: одна КС на всё (по умолчанию) или отдельная на договор / на конкретное ДС (ks.dsMode = 'sep', ks.dsScope)
+  const ksSeparate = p => p.ks.dsMode === 'sep' && (p.supplements || []).length > 0;
+  const ksScopeDs = p => ksSeparate(p) ? dsById(p, p.ks.dsScope) : null;
+  function inKsScope(p, r) {
+    if (!ksSeparate(p)) return true;
+    const d = ksScopeDs(p);
+    return d ? r.dsId === d.id : !(r.dsId && dsById(p, r.dsId));
+  }
   function ksItems(p) {
     const wo = !!p.ks.worksOnly, pm = ksPeriodMode(p);
-    return smetaRows(p, wo).filter(r => !pm || num(r.qtyNow)).map(r => {
+    return smetaRows(p, wo).filter(r => inKsScope(p, r) && (!pm || num(r.qtyNow))).map(r => {
       const qty = pm ? r.qtyNow : r.qty;
-      return { r, qty, c: smetaRow(Object.assign({}, r, { qty }), wo) };
+      const d = dsById(p, r.dsId);
+      return { r, qty, ds: d, c: smetaRow(Object.assign({}, r, { qty }), wo) };
     });
   }
   function ksTotals(p) {
@@ -438,6 +511,14 @@
   function ksYearBefore(p) {
     const y = (parseDate(p.ks.date) || new Date()).getFullYear();
     return round2((p.ksHistory || []).filter(h => (parseDate(h.date) || new Date(0)).getFullYear() === y).reduce((a, h) => a + num(h.total), 0));
+  }
+  // закрытые КС по текущей области (отдельная КС на договор / ДС считает только свои позиции); group — ДС id или '' (договор)
+  function ksBeforeScoped(p, onlyYear, group) {
+    const y = (parseDate(p.ks.date) || new Date()).getFullYear();
+    const grpOf = id => { const r = p.smeta.find(x => x.id === id); return r && r.dsId && dsById(p, r.dsId) ? r.dsId : ''; };
+    const want = group !== undefined ? group : ksSeparate(p) ? (ksScopeDs(p) ? ksScopeDs(p).id : '') : null;
+    return round2((p.ksHistory || []).filter(h => !onlyYear || (parseDate(h.date) || new Date(0)).getFullYear() === y)
+      .reduce((a, h) => a + (want === null ? num(h.total) : (h.rows || []).filter(x => grpOf(x.id) === want).reduce((b, x) => b + num(x.sum), 0)), 0));
   }
   const qtyDoneBefore = (p, rowId) => (p.ksHistory || []).reduce((a, h) => a + (h.rows || []).filter(x => x.id === rowId).reduce((b, x) => b + num(x.qty), 0), 0);
 
@@ -475,8 +556,10 @@
       if (!v.name) E('#/acts', label + ': нет наименования работ.');
       const rd = rdFor(p, a, p.works.find(x => x.id === a.workId));
       if (!rd.code) W('#/works', label + ': не задан шифр РД (ни у раздела, ни общий).');
-      if (st.startDate && a.start && a.start < st.startDate) W('#/acts', label + ': начало работ ' + fmtDate(a.start) + ' раньше начала по договору ' + fmtDate(st.startDate) + '.');
-      if (st.endDate && a.end && a.end > st.endDate) W('#/acts', label + ': окончание ' + fmtDate(a.end) + ' позже срока по договору ' + fmtDate(st.endDate) + '.');
+      // сроки — с учётом доп. соглашений
+      const wd = workDates(p);
+      if (wd.start && a.start && a.start < wd.start) W('#/acts', label + ': начало работ ' + fmtDate(a.start) + ' раньше начала по договору ' + fmtDate(wd.start) + '.');
+      if (wd.end && a.end && a.end > wd.end) W('#/acts', label + ': окончание ' + fmtDate(a.end) + ' позже срока по договору' + (dsList(p).some(d => d.endDate) ? ' с учётом доп. соглашений' : '') + ' ' + fmtDate(wd.end) + '.');
       (a.materials || []).forEach(id => {
         const m = p.materials.find(x => x.id === id);
         if (!m) { W('#/acts', label + ': в акте указан удалённый материал.'); return; }
@@ -518,14 +601,34 @@
       if (!ks.periodFrom || !ks.periodTo) W('#/smeta', 'КС: не указан отчётный период.');
       if (!ks.contractorSignerName || !ks.customerSignerName) W('#/smeta', 'КС: не указаны подписанты.');
       p.smeta.filter(r => r.name && !num(r.qty)).forEach(r => W('#/smeta', 'Смета: у позиции «' + r.name.slice(0, 60) + '» нет количества.'));
-      const price = num(st.contractPrice);
+      // цена договора с учётом ДС — с НДС; сравниваем с суммами с НДС (при ценах без НДС — после начисления НДС)
+      const cp = contractPriceNow(p), price = cp.total;
       if (price) {
-        // цена договора — с НДС; сравниваем с суммами с НДС (при ценах без НДС — после начисления НДС)
         const full = smetaTotals(p).gross;
-        if (Math.abs(full - price) > 0.01) W('#/smeta', 'Смета с НДС ' + money(full) + ' ≠ цене договора ' + money(price) + ' (разница ' + money(full - price) + ').');
+        if (Math.abs(full - price) > 0.01) W('#/smeta', 'Смета с НДС ' + money(full) + ' ≠ цене договора' + (cp.hasDs ? ' с учётом доп. соглашений' : '') + ' ' + money(price) + ' (разница ' + money(full - price) + ').');
         const done = vatSplit(p, round2(ksDoneBefore(p) + tot.total)).gross;
-        if (done - price > 0.01) E('#/smeta', 'С учётом прошлых КС выполнено на ' + money(done) + ' — больше цены договора ' + money(price) + '.');
+        if (done - price > 0.01) E('#/smeta', 'С учётом прошлых КС выполнено на ' + money(done) + ' — больше цены договора' + (cp.hasDs ? ' с учётом доп. соглашений' : '') + ' ' + money(price) + '.');
       }
+      // доп. соглашения: сумма позиций ДС = изменению цены; работы ДС — не раньше его подписания
+      dsList(p).forEach(d => {
+        const lbl = dsLabel(d);
+        if (!d.no || !d.date) W('#/settings', 'У доп. соглашения не указан номер или дата (' + (lbl || 'без номера') + ').');
+        // изменение по смете = добавленные позиции − исключённые этим ДС
+        const added = p.smeta.filter(r => r.name && r.dsId === d.id && r.excludedBy !== d.id);
+        const removed = p.smeta.filter(r => r.name && r.excludedBy === d.id);
+        const pend = p.smeta.filter(r => (r.pendingDs || []).some(x => x.dsId === d.id)).length;
+        if (pend) W('#/smeta', 'По ' + lbl + ' не приняты изменения позиций сметы: ' + pend + ' — примите или отклоните их в «Смете».');
+        // + изменённые этим ДС позиции договора: «стало − было»
+        const changed = [];
+        p.smeta.forEach(r => (r.changes || []).forEach(ch => { if (ch.dsId === d.id) changed.push(ch); }));
+        if (!d.priceMode && s(d.amount) !== '' && (added.length || removed.length || changed.length)) {
+          let sum = 0; added.forEach(r => { sum += smetaRow(r).total; }); removed.forEach(r => { sum -= smetaRow(r).total; });
+          changed.forEach(ch => { sum += smetaRow(ch.to).total - smetaRow(ch.from).total; });
+          const g = vatSplit(p, round2(sum)).gross;
+          if (Math.abs(g - num(d.amount)) > 0.01) W('#/smeta', 'Позиции по ' + lbl + ' в смете меняют цену на ' + money(g) + ', а в ДС указано ' + money(num(d.amount)) + '.');
+        }
+        if (d.date && ks.periodTo && ks.periodTo < d.date && ksItems(p).some(x => x.r.dsId === d.id)) W('#/smeta', 'В КС за период по ' + fmtDate(ks.periodTo) + ' попали работы по ' + lbl + ', подписанному позже.');
+      });
     }
     return out;
   }
@@ -538,6 +641,7 @@
     orgByKey, orgByRole, keyByRole, orgLine, sroLine, personActLine, personOrgLine, pickRep, currentRep, repMissingReason,
     matNo, matName, matLabel, matDocs, matText, matUntil, matExpired,
     workLabel, actNumber, actView, parties, smetaRow, smetaRows, smetaTotals,
-    ksPeriodMode, ksItems, ksTotals, vatSplit, netOf, vatTop, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
+    ksPeriodMode, ksItems, ksTotals, vatSplit, netOf, vatTop,
+    unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
   };
 })(typeof window !== 'undefined' ? window : globalThis);

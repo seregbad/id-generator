@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '39 (12.11.2026)';
+  const APP_VERSION = '48 (12.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -107,6 +107,29 @@
   // ================= описание полей =================
   const F = (k, l, t, o) => Object.assign({ k, l, t: t || 'text' }, o || {});
   const orgKeys = () => P.orgs.filter(o => o.key).map(o => ({ v: o.key, l: o.key + ' — ' + (o.role ? o.role + ', ' : '') + (o.name || '') }));
+  // непринятые изменения позиции из ДС (r.pendingDs): применить — как ручное изменение по ДС («было → стало» запоминается)
+  let smetaRedraw = () => render();
+  const pendingOf = r => (r.pendingDs || []).filter(x => C.dsById(P, x.dsId));
+  function pendingText(r, x) {
+    const d = C.dsById(P, x.dsId), lbl = 'ДС № ' + (d.no || '—') + ': ';
+    const was = C.smetaRow(r).total;
+    if (x.act === 'ex') return lbl + 'исключить позицию' + (x.note ? ' (' + x.note + ')' : '') + ' — −' + C.money(was) + ' руб.';
+    const now = C.smetaRow(x.to).total, parts = [];
+    if (C.num(x.to.qty) !== C.num(r.qty)) parts.push('кол-во ' + C.qty(r.qty) + ' → ' + C.qty(x.to.qty) + ' ' + (r.unit || ''));
+    const pu = C.num(r.priceWork) + C.num(r.priceMat), nu = C.num(x.to.priceWork) + C.num(x.to.priceMat);
+    if (Math.abs(pu - nu) > 0.005) parts.push('цена ' + C.money(pu) + ' → ' + C.money(nu));
+    return lbl + (parts.join('; ') || 'без изменений') + ' · сумма ' + C.money(was) + ' → ' + C.money(now) + ' (' + (now - was >= 0 ? '+' : '−') + C.money(Math.abs(now - was)) + ')';
+  }
+  function applyPending(r, x) {
+    if (x.act === 'ex') r.excludedBy = x.dsId;
+    else {
+      (r.changes = r.changes || []).push({ dsId: x.dsId, from: { qty: r.qty, priceWork: r.priceWork, priceMat: r.priceMat }, to: Object.assign({}, x.to) });
+      Object.assign(r, x.to);
+    }
+    dropPending(r, x);
+  }
+  function dropPending(r, x) { r.pendingDs = (r.pendingDs || []).filter(y => y !== x); if (!r.pendingDs.length) delete r.pendingDs; }
+  const dsOpts = () => C.dsList(P).map(d => ({ v: d.id, l: 'ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : '') + (d.subject ? ' — ' + d.subject : '') }));
   const orgRoleOpts = () => C.ORG_ROLES.map(r => ({ v: r, l: r + (C.ROLE_HINT[r] ? ' — ' + C.ROLE_HINT[r] : '') }));
   const units = () => P.lists.units || C.DEFAULT_LISTS.units;
   const REP_HINT = [
@@ -287,6 +310,32 @@
       }),
       search: r => [r.section, r.code, r.docName].join(' ')
     },
+    supplements: {
+      title: 'Дополнительные соглашения', one: 'Дополнительное соглашение',
+      fields: () => [
+        F('no', 'Номер ДС', 'text', { req: 1 }), F('date', 'Дата ДС', 'date', { req: 1 }),
+        F('subject', 'Предмет (кратко)', 'textarea', { wide: 1, hint: 'Для себя — в документы не попадает (там «Дополнительные работы по дополнительному соглашению № … от …»)' }),
+        F('priceMode', 'Как меняется цена договора', 'select', { wide: 1, rerender: 1, opts: [
+          { v: 'new', l: 'Новая цена основных работ — доп. работы по другим ДС прибавляются сверху' },
+          { v: 'total', l: 'Новая общая цена договора — уже с учётом всех прежних ДС' }
+        ], empty: 'Увеличивается / уменьшается на сумму (доп. работы)' }),
+        F('amount', 'На сумму, руб. с НДС (уменьшение — со знаком минус)', 'number', { show: w => !w.priceMode, hint: 'Пусто — по позициям этого ДС в смете; 0 — цена не меняется (например, ДС только про сроки)' }),
+        F('newPrice', 'Новая цена, руб. с НДС', 'number', { show: w => !!w.priceMode, hint: 'Например, ДС № 2 «Общая стоимость составляет 9 655 000» по расчёту основных работ — это «новая цена основных работ»' }),
+        F('startDate', 'Новое начало работ', 'date'), F('endDate', 'Новое окончание работ', 'date'),
+        F('note', 'Примечание', 'textarea', { wide: 1 })
+      ],
+      row: d => {
+        const st = C.contractPriceNow(P).steps.find(x => x.ds === d);
+        const n = P.smeta.filter(r => r.dsId === d.id).length, ex = P.smeta.filter(r => r.excludedBy === d.id).length;
+        return {
+          title: 'ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : '') + (d.subject ? ' — ' + d.subject : ''),
+          sub: [st && st.delta ? 'цена ' + (st.delta > 0 ? '+' : '−') + C.money(Math.abs(st.delta)) + ' → ' + C.money(st.after) : 'цена не меняется',
+            d.endDate ? 'окончание ' + C.fmtDate(d.endDate) : ''].filter(Boolean).join(' · '),
+          badges: [n ? { t: 'позиций в смете: ' + n, c: 'ok' } : null, ex ? { t: 'исключено позиций: ' + ex, c: 'warn' } : null, !d.no || !d.date ? { t: 'нет номера или даты', c: 'warn' } : null]
+        };
+      },
+      search: d => [d.no, d.subject, d.note].join(' ')
+    },
     smeta: {
       title: 'Позиции сметы', one: 'Позиция сметы',
       fields: () => [
@@ -294,14 +343,28 @@
         F('unit', 'Ед. изм.', 'combo', { opts: units }),
         F('qty', 'Количество', 'number'),
         F('priceWork', 'Цена работ за ед., ' + (C.vatTop(P) ? 'без НДС' : 'с НДС'), 'number'),
-        F('priceMat', 'Цена материала за ед., ' + (C.vatTop(P) ? 'без НДС' : 'с НДС'), 'number')
+        F('priceMat', 'Цена материала за ед., ' + (C.vatTop(P) ? 'без НДС' : 'с НДС'), 'number'),
+        F('dsId', 'Основание позиции', 'select', { wide: 1, show: () => P.supplements.length > 0, opts: dsOpts, empty: 'Основной договор', hint: 'Дополнительные работы — выберите доп. соглашение: в смете и КС они пойдут отдельным разделом' }),
+        F('excludedBy', 'Исключена из договора', 'select', { wide: 1, show: () => P.supplements.length > 0, opts: dsOpts, empty: 'Нет — позиция действует', hint: 'Если доп. соглашение исключило работы: позиция останется в списке, но в смету и КС не попадёт' })
       ],
       row: r => {
         const c = C.smetaRow(r), before = C.qtyDoneBefore(P, r.id);
         const left = C.num(r.qty) - before - C.num(r.qtyNow);
+        const ds = C.dsById(P, r.dsId), ex = C.dsById(P, r.excludedBy);
+        const chs = (r.changes || []).filter(ch => C.dsById(P, ch.dsId));
+        const was = chs.length ? chs[0].from : null; // как было по договору
         return {
-          title: r.name || 'Без названия', sub: C.qty(r.qty) + ' ' + (r.unit || '') + ' × ' + C.money(c.unitPrice) + ' = ' + C.money(c.total) + ' руб.' + (before ? ' · по прошлым КС: ' + C.qty(before) : ''),
-          badges: [left < -1e-6 ? { t: 'больше, чем в смете', c: 'danger' } : before || C.num(r.qtyNow) ? { t: 'осталось ' + C.qty(Math.max(0, left)) + ' ' + (r.unit || '') } : null]
+          title: r.name || 'Без названия', sub: C.qty(r.qty) + ' ' + (r.unit || '') + ' × ' + C.money(c.unitPrice) + ' = ' + C.money(c.total) + ' руб.' + (before ? ' · по прошлым КС: ' + C.qty(before) : '') +
+            (was ? ' · по договору было: ' + C.qty(was.qty) + ' × ' + C.money(C.num(was.priceWork) + C.num(was.priceMat)) + ' = ' + C.money(C.smetaRow(was).total) : ''),
+          badges: [ds ? { t: 'ДС № ' + (ds.no || '—'), c: 'ok' } : null, ex ? { t: 'исключена по ДС № ' + (ex.no || '—'), c: 'warn' } : null,
+            ...chs.map(ch => ({ t: 'изменена по ДС № ' + (C.dsById(P, ch.dsId).no || '—') })),
+            pendingOf(r).length ? { t: 'есть изменение по ДС — не принято', c: 'warn' } : null,
+            left < -1e-6 ? { t: 'больше, чем в смете', c: 'danger' } : before || C.num(r.qtyNow) ? { t: 'осталось ' + C.qty(Math.max(0, left)) + ' ' + (r.unit || '') } : null],
+          // изменение из загруженного ДС — применить или отклонить прямо здесь
+          notes: pendingOf(r).map(x => ({ text: pendingText(r, x), buttons: [
+            { label: 'Применить', cls: 'btn-primary', onClick: () => { applyPending(r, x); touch(); smetaRedraw(); toast('Изменение из ДС применено'); } },
+            { label: 'Отклонить', onClick: () => { dropPending(r, x); touch(); smetaRedraw(); } }
+          ] }))
         };
       },
       search: r => r.name
@@ -521,7 +584,7 @@
   // форма для одного объекта (настройки) — сохраняет сразу
   function formGrid(obj, fields, onAny) {
     const g = document.createElement('div'); g.className = 'grid';
-    fields.forEach(f => g.appendChild(fieldEl(f, obj, (ff, val) => { obj[ff.k] = val; touch(); if (onAny) onAny(ff); })));
+    fields.forEach(f => (f.show && !f.show(obj)) || g.appendChild(fieldEl(f, obj, (ff, val) => { obj[ff.k] = val; touch(); if (onAny) onAny(ff); })));
     return g;
   }
 
@@ -621,8 +684,12 @@
         if (r.sub) html += '<div class="row-sub">' + esc(r.sub) + '</div>';
         const b = (r.badges || []).filter(Boolean);
         if (b.length) html += '<div style="margin-top:4px">' + b.map(x => '<span class="badge ' + (x.c || '') + '">' + esc(x.t) + '</span>').join('') + '</div>';
+        // пометки с кнопками прямо в строке (например, непринятые изменения из доп. соглашения)
+        (r.notes || []).forEach((nt, ni) => {
+          html += '<div class="row-note"><span>' + esc(nt.text) + '</span>' + (nt.buttons || []).map((nb, bi) => '<button type="button" class="btn btn-sm ' + (nb.cls || '') + '" data-note="' + ni + ':' + bi + '">' + esc(nb.label) + '</button>').join('') + '</div>';
+        });
         html += '</div><div class="row-actions">';
-        (opts.rowButtons || []).forEach((rb, i) => { html += '<button type="button" class="icon-btn" data-rb="' + i + '" title="' + esc(rb.title) + '">' + rb.icon + '</button>'; });
+        (opts.rowButtons || []).forEach((rb, i) => { if (rb.show && !rb.show(it)) return; html +='<button type="button" class="icon-btn" data-rb="' + i + '" title="' + esc(rb.title) + '">' + rb.icon + '</button>'; });
         html += '<button type="button" class="icon-btn" data-a="copy" title="Копировать">&#10697;</button>' +
           '<button type="button" class="icon-btn" data-a="up" title="Выше">&#8593;</button>' +
           '<button type="button" class="icon-btn" data-a="down" title="Ниже">&#8595;</button></div>';
@@ -656,6 +723,8 @@
         row.addEventListener('click', e => {
           if (e.target.closest('.row-inline')) return;
           const btn = e.target.closest('button');
+          if (btn && btn.dataset.note) { const [ni, bi] = btn.dataset.note.split(':').map(Number); r.notes[ni].buttons[bi].onClick(); return; }
+          if (e.target.closest('.row-note')) return;
           const chk = e.target.closest('[data-chk]');
           if (chk) { it[opts.check.key] = chk.checked ? 1 : ''; touch(); opts.onCheck && opts.onCheck(); return; }
           if (e.target.closest('label.check')) return;
@@ -716,7 +785,22 @@
         F('copies', 'Экземпляров акта по умолчанию', 'number'),
         F('projectDocName', 'Наименование проектной / рабочей документации', 'text', { wide: 1, hint: 'В актах дополняется «разработчик …» по проектировщику' }),
         F('vat', 'Ставка НДС (0,22 = 22%)', 'number')
-      ], updateHeader)]));
+      ], () => { updateHeader(); updPrice(); })]));
+      // дополнительные соглашения: меняют цену, сроки, добавляют или исключают позиции сметы
+      const dsCard = card('2. Дополнительные соглашения', [para('Каждое ДС — отдельной строкой: на сколько меняется цена договора (или новая цена) и сроки. Дополнительные работы добавьте в «Смету» с основанием «ДС № …», исключённые — отметьте «Исключена из договора». ДС можно загрузить файлом через «Загрузку документов».')]);
+      const priceBox = document.createElement('div'); priceBox.className = 'kpi'; priceBox.style.marginBottom = '10px';
+      const updPrice = () => {
+        const cp = C.contractPriceNow(P);
+        priceBox.style.display = cp.hasDs ? '' : 'none';
+        priceBox.innerHTML = '<div><span class="muted small">Цена по договору</span><b>' + C.money(cp.base) + '</b></div>' +
+          cp.steps.map(x => '<div><span class="muted small">ДС № ' + esc(x.ds.no || '—') + '</span><b>' + (x.delta >= 0 ? '+' : '−') + C.money(Math.abs(x.delta)) + '</b></div>').join('') +
+          '<div><span class="muted small">Цена с учётом ДС</span><b>' + C.money(cp.total) + '</b></div>';
+      };
+      dsCard.appendChild(priceBox);
+      main.appendChild(dsCard);
+      collection(dsCard, 'supplements', () => P.supplements, { noSearch: true, after: updPrice });
+      const wd = C.workDates(P);
+      if (P.supplements.some(d => d.startDate || d.endDate)) dsCard.appendChild(para('Сроки работ с учётом ДС: ' + esc((C.fmtDate(wd.start) || '…') + ' – ' + (C.fmtDate(wd.end) || '…'))));
       main.appendChild(card('Для общего журнала работ', [formGrid(st, [
         F('workKind', 'Вид работ', 'combo', { opts: () => ['строительство', 'реконструкция', 'капитальный ремонт'] }),
         F('permit', 'Разрешение на строительство', 'textarea', { wide: 1 }),
@@ -843,7 +927,7 @@
       const updKpi = () => {
         // все суммы в сводке — с НДС (цена договора тоже с НДС)
         const t = C.smetaTotals(P), k = C.ksTotals(P), before = C.vatSplit(P, C.ksDoneBefore(P)).gross;
-        const price = C.num(P.settings.contractPrice) || C.smetaTotals(P, !!P.ks.worksOnly).gross;
+        const price = C.contractPriceNow(P).total || C.smetaTotals(P, !!P.ks.worksOnly).gross;
         kpi.innerHTML = '<div><span class="muted small">Смета с НДС' + (t.top ? ' (без НДС ' + C.money(t.net) + ')' : '') + '</span><b>' + C.money(t.gross) + '</b></div>' +
           '<div><span class="muted small">в т.ч. НДС ' + t.vatPct + '%</span><b>' + C.money(t.vatSum) + '</b></div>' +
           '<div><span class="muted small">КС № ' + esc(P.ks.number || '—') + (C.ksPeriodMode(P) ? ' (объёмы за период)' : ' (вся смета)') + ', с НДС</span><b>' + C.money(k.gross) + '</b></div>' +
@@ -853,11 +937,80 @@
       main.appendChild(card(null, [kpi]));
       const c = card('Позиции сметы', [para('Поле «В этой КС» — объём, выполненный за текущий отчётный период. Если оно заполнено хотя бы у одной позиции, КС-2 и КС-3 формируются только по таким позициям и на эти объёмы. Если везде пусто — на всю смету.')]);
       main.appendChild(c);
+      // все непринятые изменения из ДС — одной кнопкой
+      const pendBar = document.createElement('div'); c.appendChild(pendBar);
+      const drawPend = () => {
+        const list = []; P.smeta.forEach(r => pendingOf(r).forEach(x => list.push([r, x])));
+        pendBar.innerHTML = '';
+        if (!list.length) return;
+        const box = document.createElement('div'); box.className = 'row-note row-note-bar';
+        box.innerHTML = '<span><b>Изменения из доп. соглашений, не принятые: ' + list.length + '.</b> Они показаны у позиций ниже — примите или отклоните каждое, или все сразу.</span>';
+        box.appendChild(btn('Применить все', () => confirmBox('Применить все изменения из ДС (' + list.length + ')? Отменить каждое можно потом кнопкой ↶ у позиции.', 'Применить', () => {
+          list.forEach(([r, x]) => applyPending(r, x)); touch(); smetaRedraw(); toast('Применено изменений: ' + list.length);
+        }), 'btn-sm btn-primary'));
+        box.appendChild(btn('Отклонить все', () => confirmBox('Отклонить все непринятые изменения из ДС (' + list.length + ')?', 'Отклонить', () => {
+          list.forEach(([r, x]) => dropPending(r, x)); touch(); smetaRedraw();
+        }), 'btn-sm'));
+        pendBar.appendChild(box);
+      };
       const smetaCtl = collection(c, 'smeta', () => P.smeta, {
         noSearch: true, after: updKpi,
         inline: [{ k: 'qtyNow', l: 'В этой КС', t: 'number', cls: 'inl-s' }],
+        // отменить последнее изменение позиции по ДС — вернуть прежние количество и цены
+        rowButtons: [{ icon: '&#9998;', title: 'Изменить позицию по доп. соглашению (количество, цены или исключить)', show: r => P.supplements.length > 0 && !(r.dsId && C.dsById(P, r.dsId)) && !r.excludedBy, onClick: r => changeByDs(r) }, { icon: '&#8630;', title: 'Отменить изменение по доп. соглашению', show: r => (r.changes || []).length > 0 || !!r.excludedBy, onClick: r => {
+          // исключённую сначала возвращаем в договор
+          if (r.excludedBy) {
+            const d = C.dsById(P, r.excludedBy);
+            confirmBox('Вернуть позицию «' + r.name + '» в договор (отменить исключение' + (d ? ' по ДС № ' + (d.no || '—') : '') + ')?', 'Вернуть', () => { delete r.excludedBy; touch(); smetaCtl.draw(); });
+            return;
+          }
+          const ch = r.changes[r.changes.length - 1], d = C.dsById(P, ch.dsId);
+          confirmBox('Вернуть позицию «' + r.name + '» как было до ' + (d ? 'ДС № ' + (d.no || '—') : 'удалённого ДС') + ': ' + C.qty(ch.from.qty) + ' × ' + C.money(C.num(ch.from.priceWork) + C.num(ch.from.priceMat)) + '?', 'Вернуть', () => {
+            Object.assign(r, ch.from); r.changes.pop(); if (!r.changes.length) delete r.changes;
+            touch(); smetaCtl.draw();
+          });
+        } }],
         onInline: () => { updKpi(); smetaCtl && smetaCtl.draw(); }
       });
+      smetaRedraw = () => { smetaCtl.draw(); updKpi(); drawPend(); };
+      drawPend();
+      // ручное изменение позиции договора по ДС: запоминается «было → стало», как при загрузке ДС
+      const changeByDs = r => {
+        const ds = C.dsList(P);
+        const w = { dsId: ds[ds.length - 1].id, act: '', qty: r.qty, priceWork: r.priceWork, priceMat: r.priceMat };
+        const was = C.smetaRow(r);
+        const body = document.createElement('div');
+        const res = para('');
+        const upd = () => {
+          const t = C.smetaRow(w).total;
+          res.innerHTML = w.act === 'ex' ? 'Позиция будет исключена: −' + C.money(was.total) + ' руб.'
+            : 'Было: ' + C.qty(r.qty) + ' × ' + C.money(was.unitPrice) + ' = ' + C.money(was.total) + ' руб. → стало: ' + C.money(t) + ' руб. (' + (t - was.total >= 0 ? '+' : '−') + C.money(Math.abs(t - was.total)) + ')';
+        };
+        const draw = () => {
+          body.innerHTML = '';
+          body.appendChild(formGrid(w, [
+            F('dsId', 'По доп. соглашению', 'select', { wide: 1, opts: dsOpts }),
+            F('act', 'Что меняется', 'select', { wide: 1, rerender: 1, opts: [{ v: 'ex', l: 'Исключить позицию из договора' }], empty: 'Количество и / или цены' }),
+            F('qty', 'Количество (было ' + C.qty(r.qty) + ' ' + (r.unit || '') + ')', 'number', { show: o => o.act !== 'ex' }),
+            F('priceWork', 'Цена работ за ед. (было ' + C.money(C.num(r.priceWork)) + ')', 'number', { show: o => o.act !== 'ex' }),
+            F('priceMat', 'Цена материала за ед. (было ' + C.money(C.num(r.priceMat)) + ')', 'number', { show: o => o.act !== 'ex' })
+          ], f => { if (f.k === 'act') draw(); else upd(); }));
+          body.appendChild(res); upd();
+        };
+        draw();
+        openDialog('Изменение по ДС: ' + r.name, body, ['spacer', { label: 'Отмена', onClick: closeDialog }, {
+          label: 'Применить', cls: 'btn-primary', onClick: () => {
+            if (w.act === 'ex') { r.excludedBy = w.dsId; }
+            else {
+              const to = { qty: C.num(w.qty), priceWork: w.priceWork === '' ? '' : C.num(w.priceWork), priceMat: w.priceMat === '' ? '' : C.num(w.priceMat) };
+              if (to.qty === C.num(r.qty) && C.num(to.priceWork) === C.num(r.priceWork) && C.num(to.priceMat) === C.num(r.priceMat)) { toast('Значения не изменились'); return; }
+              (r.changes = r.changes || []).push({ dsId: w.dsId, from: { qty: r.qty, priceWork: r.priceWork, priceMat: r.priceMat }, to });
+              Object.assign(r, to);
+            }
+            touch(); closeDialog(); smetaCtl.draw(); toast('Позиция изменена по ДС');
+          }
+        }]);
+      };
       // история КС: закрыть текущую и начать следующую
       const hist = card('КС по объекту', []);
       main.appendChild(hist);
@@ -913,11 +1066,15 @@
         F('periodFrom', 'Отчётный период с', 'date'), F('periodTo', 'Отчётный период по', 'date'),
         F('opType', 'Вид операции (код)'), F('pricesAt', 'Смета составлена в ценах на'),
         F('term', 'Срок выполнения работ (для сметы)', 'textarea', { wide: 1 }),
+        ...(P.supplements.length ? [
+          F('dsMode', 'КС при доп. соглашениях', 'select', { wide: 1, opts: [{ v: 'sep', l: 'Отдельная КС на договор и на каждое ДС — в шапке «№ договора (ДС № … от …)»' }], empty: 'Одна КС: работы по договору и по ДС разделами, в КС-3 — отдельные этапы (по умолчанию)' }),
+          F('dsScope', 'Эта КС оформляется по', 'select', { wide: 1, show: () => P.ks.dsMode === 'sep', opts: dsOpts, empty: 'Основному договору' })
+        ] : []),
         F('ks3Mode', 'Строки КС-3', 'select', { opts: [{ v: 'items', l: 'По позициям сметы — как в КС-2' }], empty: 'Одной строкой — этап / «Работы по договору №…»' }),
         F('stageName', 'Наименование этапа для КС-3 (если одной строкой)', 'textarea', { wide: 1, hint: 'Пусто — «Работы по договору № …»' }),
         F('contractorSignerPos', 'Подписант Подрядчика: должность'), F('contractorSignerName', 'Подписант Подрядчика: Фамилия И.О.'),
         F('customerSignerPos', 'Подписант Заказчика: должность'), F('customerSignerName', 'Подписант Заказчика: Фамилия И.О.')
-      ], f => { if (f.k === 'vatMode') render(); else updKpi(); })]));
+      ], f => { if (f.k === 'vatMode' || f.k === 'dsMode') render(); else updKpi(); })]));
     },
     ozhr() {
       const o = P.ozhr;

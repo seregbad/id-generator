@@ -182,6 +182,10 @@ table.t tr.row-bad td { background: color-mix(in srgb, var(--danger, #c0392b) 12
 .row .row-title { font-weight: 600; overflow-wrap: anywhere; }
 .row .row-sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .row .row-actions { display: flex; gap: 2px; flex-shrink: 0; }
+/* пометка с кнопками в строке списка: изменение из ДС «было → стало» */
+.row-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; padding: 6px 8px; border-radius: 8px; background: var(--warn-soft); border: 1px solid var(--warn); font-size: 12px; color: var(--text, inherit); cursor: default; }
+.row-note > span { flex: 1 1 260px; }
+.row-note-bar { margin: 0 0 10px; font-size: 13px; }
 .row-inline { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; cursor: default; }
 .row-inline .inl { display: flex; flex-direction: column; gap: 2px; flex: 1 1 150px; min-width: 0; max-width: 220px; }
 .row-inline .inl.inl-s { flex: 0 1 110px; }
