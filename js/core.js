@@ -250,9 +250,10 @@
   // текущий представитель (для титула ОЖР): «по» пусто или ≥ сегодня
   function currentRep(p, role) {
     const t = todayISO();
-    let found = null;
-    p.people.forEach(r => { if (r.role === role && (!r.to || r.to >= t)) found = r; });
-    return found;
+    let found = null, last = null;
+    p.people.forEach(r => { if (r.role !== role) return; last = r; if (!r.to || r.to >= t) found = r; });
+    // у всех срок вышел (объект сдан) — для титула ОЖР берём последнего, а не пустую строку
+    return found || last;
   }
 
   // ---------- материалы ----------
@@ -260,8 +261,9 @@
   function matName(m) { return s(m.name) + (m.mark ? ' ' + m.mark : ''); }
   function matLabel(p, m) { return matNo(p, m) + ' | ' + matName(m); }
   function docText(type, no, date, until) {
-    if (!type) return '';
-    let t = lowerFirst(type);
+    // номер есть, а вид не выбран (бывает после загрузки скана) — документ не теряем
+    if (!type && !no) return '';
+    let t = type ? lowerFirst(type) : 'документ о качестве';
     if (no) t += ' № ' + no;
     if (date) t += ' от ' + fmtDate(date);
     if (until) t += ' (действ. до ' + fmtDate(until) + ')';
@@ -281,7 +283,7 @@
   }
   // самый ранний срок действия документов материала
   function matUntil(m) {
-    return [m.doc1Type ? m.doc1Until : '', m.doc2Type ? m.doc2Until : ''].filter(Boolean).sort()[0] || '';
+    return [m.doc1Type || m.doc1No ? m.doc1Until : '', m.doc2Type || m.doc2No ? m.doc2Until : ''].filter(Boolean).sort()[0] || '';
   }
   function matExpired(m, onDate) {
     const u = matUntil(m);
@@ -340,6 +342,8 @@
     if (a.start && a.end && a.start > a.end) warnings.push('дата начала позже окончания');
     if (!reps[0]) warnings.push('нет представителя СК Заказчика: ' + repMissingReason(p, REP_ROLES[0], date));
     if (!reps[1]) warnings.push('нет представителя Подрядчика: ' + repMissingReason(p, REP_ROLES[1], date));
+    // работы выполнил субподрядчик, а его представителя нет — строка 5 акта пустая
+    if (a.executor && a.executor !== builderKey && !reps[4]) warnings.push('работы выполнил «' + a.executor + '», но нет его представителя с ролью «' + REP_ROLES[4] + '» на дату акта');
     mats.forEach(m => { if (matExpired(m, date)) warnings.push('истёк документ: ' + matName(m)); });
     // больше 5 документов о качестве — по форме 344/пр в п. 3 (АООК — п. 4) ссылка на реестр, реестр прикладывается к акту
     const docCount = mats.reduce((n, m) => n + (m.doc1Type || m.doc1No ? 1 : 0) + (m.doc2Type || m.doc2No ? 1 : 0), 0);
@@ -394,12 +398,22 @@
     return { total: round2(q * (w + m)), work: round2(q * w), mat: round2(q * m), unitPrice: w + m };
   }
   const smetaRows = (p, worksOnly) => p.smeta.filter(r => r.name && (!worksOnly || num(r.priceWork)));
+  // НДС: цены в смете с НДС (по умолчанию, как в договорах «в т.ч. НДС») или без НДС — НДС сверху (ks.vatMode = 'top').
+  // total — сумма в ценах сметы; net — без НДС; vatSum — НДС; gross — с НДС
+  const vatTop = p => p.ks && p.ks.vatMode === 'top';
+  function vatSplit(p, total) {
+    const vat = num(p.settings.vat);
+    if (vatTop(p)) { const vatSum = round2(total * vat); return { net: total, vatSum, gross: round2(total + vatSum) }; }
+    const vatSum = round2(total * vat / (1 + vat));
+    return { net: round2(total - vatSum), vatSum, gross: total };
+  }
+  // сумма в ценах сметы → без НДС (для граф КС-3, где по бланку суммы без НДС)
+  const netOf = (p, x) => vatSplit(p, round2(x)).net;
   function smetaTotals(p, worksOnly) {
     let total = 0, work = 0, mat = 0;
     smetaRows(p, worksOnly).forEach(r => { const c = smetaRow(r, worksOnly); total += c.total; work += c.work; mat += c.mat; });
     total = round2(total); work = round2(work); mat = round2(mat);
-    const vat = num(p.settings.vat);
-    return { total, work, mat, vatSum: round2(total * vat / (1 + vat)), vatPct: Math.round(vat * 100) };
+    return Object.assign({ total, work, mat, vatPct: Math.round(num(p.settings.vat) * 100), top: vatTop(p) }, vatSplit(p, total));
   }
 
   // ---------- КС за период ----------
@@ -417,8 +431,7 @@
     let total = 0, work = 0, mat = 0;
     ksItems(p).forEach(({ c }) => { total += c.total; work += c.work; mat += c.mat; });
     total = round2(total);
-    const vat = num(p.settings.vat);
-    return { total, work: round2(work), mat: round2(mat), vatSum: round2(total * vat / (1 + vat)), vatPct: Math.round(vat * 100) };
+    return Object.assign({ total, work: round2(work), mat: round2(mat), vatPct: Math.round(num(p.settings.vat) * 100), top: vatTop(p) }, vatSplit(p, total));
   }
   // закрытые КС: сумма и объёмы по позициям
   const ksDoneBefore = p => round2((p.ksHistory || []).reduce((a, h) => a + num(h.total), 0));
@@ -447,9 +460,15 @@
     if (!st.address) W('#/settings', 'Не указан адрес объекта.');
     if (!st.contractNo) W('#/settings', 'Не указан номер договора (КС-2, КС-3, смета, реестр).');
     partyWarnings(p).forEach(t => W('#/orgs', t));
+    // две организации с одной ролью — в шапки идёт первая по списку
+    [ROLE.developer, ROLE.techCustomer, ROLE.genContractor, ROLE.contractor, ROLE.designer].forEach(role => {
+      const same = p.orgs.filter(o => o.role === role);
+      if (same.length > 1) W('#/orgs', 'Роль «' + role + '» у нескольких организаций (' + same.map(o => o.key).join(', ') + ') — в шапки документов попадёт первая: «' + same[0].key + '». Лишним поставьте другую роль.');
+    });
+    p.materials.filter(m => m.name && !m.doc1Type && m.doc1No).forEach(m => W('#/materials', matNo(p, m) + ' ' + matName(m) + ': у документа о качестве не выбран вид — в актах будет «документ о качестве № …».'));
     // акты
     const acts = p.acts.filter(a => a.type);
-    const nums = {};
+    const nums = {}, ambig = {};
     acts.forEach(a => {
       const v = actView(p, a), label = a.type + ' № ' + v.number;
       v.warnings.forEach(t => E('#/acts', label + ': ' + t + '.'));
@@ -465,6 +484,22 @@
       });
       const key = a.type + '|' + v.number;
       if (nums[key]) E('#/acts', 'Номер ' + label + ' повторяется.'); else nums[key] = 1;
+      // номер считается по порядку: удалили / переставили акт — у уже распечатанного номер сдвинулся
+      if (a.printedNo && a.printedNo !== v.number) E('#/acts', a.type + ' «' + (v.name || '').slice(0, 50) + '» печатался с № ' + a.printedNo + ', а сейчас получается № ' + v.number + ' (акт выше удалили или переставили). Впишите «№ вручную» или верните порядок.');
+      const date = a.actDate || a.end || '';
+      if (!v.reps[2] && (a.type === 'АОСР' || a.type === 'АООК')) W('#/people', label + ': нет представителя СК Подрядчика на ' + fmtDate(date) + ' — строка в акте будет пустой.');
+      // на дату подходят двое с одной ролью — молча берётся последний в списке (собираем по ролям, выводим одной строкой)
+      if (date) REP_ROLES.slice(0, 3).forEach((role, i) => {
+        if (a['rep' + i]) return;
+        const ok = p.people.filter(r => r.role === role && (!r.from || r.from <= date) && (!r.to || r.to >= date));
+        if (ok.length < 2) return;
+        const k = role + '|' + ok.map(r => r.id).join(',');
+        (ambig[k] = ambig[k] || { role, ok, acts: [] }).acts.push(a.type + ' № ' + v.number);
+      });
+    });
+    Object.values(ambig).forEach(x => {
+      const who = x.ok.map(r => shortName(r.fullName));
+      W('#/people', 'С ролью «' + x.role + '» одновременно действуют ' + who.join(', ') + ' В акты (' + (x.acts.length > 4 ? x.acts.slice(0, 3).join(', ') + ' и ещё ' + (x.acts.length - 3) : x.acts.join(', ')) + ') попадёт ' + who[who.length - 1] + ' Если нужен другой — проставьте даты «с/по» в «Представителях» или выберите подписанта в акте.');
     });
     // материалы
     p.materials.filter(m => m.name).forEach(m => {
@@ -485,9 +520,10 @@
       p.smeta.filter(r => r.name && !num(r.qty)).forEach(r => W('#/smeta', 'Смета: у позиции «' + r.name.slice(0, 60) + '» нет количества.'));
       const price = num(st.contractPrice);
       if (price) {
-        const full = smetaTotals(p).total;
-        if (Math.abs(full - price) > 0.01) W('#/smeta', 'Смета ' + money(full) + ' ≠ цене договора ' + money(price) + ' (разница ' + money(full - price) + ').');
-        const done = ksDoneBefore(p) + tot.total;
+        // цена договора — с НДС; сравниваем с суммами с НДС (при ценах без НДС — после начисления НДС)
+        const full = smetaTotals(p).gross;
+        if (Math.abs(full - price) > 0.01) W('#/smeta', 'Смета с НДС ' + money(full) + ' ≠ цене договора ' + money(price) + ' (разница ' + money(full - price) + ').');
+        const done = vatSplit(p, round2(ksDoneBefore(p) + tot.total)).gross;
         if (done - price > 0.01) E('#/smeta', 'С учётом прошлых КС выполнено на ' + money(done) + ' — больше цены договора ' + money(price) + '.');
       }
     }
@@ -502,6 +538,6 @@
     orgByKey, orgByRole, keyByRole, orgLine, sroLine, personActLine, personOrgLine, pickRep, currentRep, repMissingReason,
     matNo, matName, matLabel, matDocs, matText, matUntil, matExpired,
     workLabel, actNumber, actView, parties, smetaRow, smetaRows, smetaTotals,
-    ksPeriodMode, ksItems, ksTotals, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
+    ksPeriodMode, ksItems, ksTotals, vatSplit, netOf, vatTop, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
   };
 })(typeof window !== 'undefined' ? window : globalThis);

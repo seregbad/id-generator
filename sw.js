@@ -1,5 +1,5 @@
 /* Офлайн-кэш приложения. При изменении файлов увеличьте VERSION. */
-const VERSION = 'idgen-v27';
+const VERSION = 'idgen-v39';
 const FILES = [
   './', './index.html', './manifest.webmanifest',
   './css/app.css', './js/core.js', './js/app.js', './js/pdf.js', './js/importer.js', './js/backup.js', './js/sync.js', './js/docx.js',

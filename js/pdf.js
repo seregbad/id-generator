@@ -686,9 +686,10 @@
     const tot = C.smetaTotals(p);
     const P = C.parties(p);
     const year = (C.parseDate(ks.date) || new Date()).getFullYear();
-    const appr = 'Смета с учетом НДС ' + tot.vatPct + '% в сумме: ' + C.money(tot.total) + ' руб.';
+    const appr = 'Смета с учетом НДС ' + tot.vatPct + '% в сумме: ' + C.money(tot.gross) + ' руб.';
+    const vt = tot.top ? 'без НДС' : 'с НДС';
     const body = [
-      [{ text: 'Номер п/п', rowSpan: 3 }, { text: 'Наименование работ и затрат', rowSpan: 3 }, { text: 'Ед. изм.', rowSpan: 3 }, { text: 'Кол-во', rowSpan: 3 }, { text: 'Стоимость единицы с НДС, руб', colSpan: 2 }, {}, { text: 'Общая стоимость с НДС, руб', colSpan: 3 }, {}, {}],
+      [{ text: 'Номер п/п', rowSpan: 3 }, { text: 'Наименование работ и затрат', rowSpan: 3 }, { text: 'Ед. изм.', rowSpan: 3 }, { text: 'Кол-во', rowSpan: 3 }, { text: 'Стоимость единицы ' + vt + ', руб', colSpan: 2 }, {}, { text: 'Общая стоимость ' + vt + ', руб', colSpan: 3 }, {}, {}],
       [{}, {}, {}, {}, { text: 'в т.ч.:', colSpan: 2 }, {}, { text: 'Всего', rowSpan: 2 }, { text: 'в т.ч.:', colSpan: 2 }, {}],
       [{}, {}, {}, {}, 'Стоимость работ', 'Стоимость материала', {}, 'Стоимость работ', 'Стоимость материала'],
       nums(9)
@@ -701,10 +702,17 @@
         R(C.money(c.total)), R(C.money(c.work)), R(C.money(c.mat))]);
     });
     const totRow = (t, v) => [{ text: t, colSpan: 6, alignment: 'right', bold: true }, {}, {}, {}, {}, {}, { text: v, colSpan: 3, alignment: 'right', bold: true }, {}, {}];
-    body.push(totRow('Итого с НДС (работы и материалы):', C.money(tot.total)));
-    body.push(totRow('в т.ч. работы / материалы:', C.money(tot.work) + ' / ' + C.money(tot.mat)));
-    body.push(totRow('в т.ч. НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)));
-    body.push(totRow('Всего с НДС ' + tot.vatPct + '%:', C.money(tot.total)));
+    // цены с НДС: «Итого» и «в т.ч. НДС» (без дублирующего «Всего с НДС»); цены без НДС: «Итого», «НДС», «Всего с НДС»
+    if (tot.top) {
+      body.push(totRow('Итого без НДС (работы и материалы):', C.money(tot.net)));
+      body.push(totRow('в т.ч. работы / материалы:', C.money(tot.work) + ' / ' + C.money(tot.mat)));
+      body.push(totRow('НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)));
+      body.push(totRow('Всего с НДС:', C.money(tot.gross)));
+    } else {
+      body.push(totRow('Итого (работы и материалы):', C.money(tot.gross)));
+      body.push(totRow('в т.ч. работы / материалы:', C.money(tot.work) + ' / ' + C.money(tot.mat)));
+      body.push(totRow('в т.ч. НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)));
+    }
     const sideBlock = (title, role, pos, name) => ({
       stack: [
         { text: title, bold: true },
@@ -733,45 +741,53 @@
     const st = p.settings, ks = p.ks;
     const P = C.parties(p);
     const okpo = o => s(o && o.okpo);
+    // КС-3 — книжный лист (как бланк), КС-2 — альбомный: на книжном подписи и столбец кодов уже
+    const portrait = kind === 'КС-3', LW = portrait ? 108 : 118;
+    // как в бланке КС-2 / КС-3: одна строка на участника — подпись слева, подчёркнутое значение, под ним пояснение;
+    // справа сплошной столбец кодов — по одной ячейке на строку (пояснения своих ячеек не создают)
+    const party = (label, value, cap) => ({
+      stack: [
+        // подписи одной ширины — значения начинаются с одного места, как в бланке
+        { table: { widths: [LW, '*'], body: [[Object.assign({ text: label, border: NB, noWrap: true }, portrait ? { fontSize: 8 } : {}), { text: s(value) || ' ', border: BB, fontSize: portrait ? 7.5 : 8.5 }]] }, layout: UL },
+        { text: cap, fontSize: 6, italics: true, alignment: 'center', margin: [LW, 0, 0, 0] }
+      ], border: NB
+    });
     const rows = [
-      ['Инвестор: ' + C.orgLine(P.customer), 'По ОКПО', okpo(P.customer)],
-      ['(организация, адрес, телефон, факс)', '', ''],
-      ['Заказчик (Генподрядчик): ' + C.orgLine(P.ksCustomer), 'По ОКПО', okpo(P.ksCustomer)],
-      ['(организация, адрес, телефон, факс)', '', ''],
-      ['Подрядчик (Субподрядчик): ' + C.orgLine(P.ksContractor), 'По ОКПО', okpo(P.ksContractor)],
-      ['(организация, адрес, телефон, факс)', '', ''],
-      ['Стройка: ' + [st.objectName, st.address].filter(Boolean).join(', '), 'По ОКПО', ''],
-      ['(наименование, адрес)', '', ''],
-      [kind === 'КС-2' ? 'Объект: ' + s(st.objectName) : '', 'Вид деятельности по ОКДП', ''],
-      ['', 'Договор подряда (контракт)    номер', s(st.contractNo)],
-      ['', 'дата', C.fmtDate(st.contractDate)],
-      ['', 'Вид операции', s(ks.opType)]
+      [party('Инвестор', C.orgLine(P.customer), '(организация, адрес, телефон, факс)'), 'по ОКПО', okpo(P.customer)],
+      [party('Заказчик (Генподрядчик)', C.orgLine(P.ksCustomer), '(организация, адрес, телефон, факс)'), 'по ОКПО', okpo(P.ksCustomer)],
+      [party('Подрядчик (Субподрядчик)', C.orgLine(P.ksContractor), '(организация, адрес, телефон, факс)'), 'по ОКПО', okpo(P.ksContractor)],
+      [party('Стройка', [st.objectName, st.address].filter(Boolean).join(', '), '(наименование, адрес)'), '', ''],
+      [kind === 'КС-2' ? party('Объект', st.objectName, '(наименование)') : { text: '', border: NB }, '', ''],
+      [{ text: '', border: NB }, 'Вид деятельности по ОКДП', ''],
+      [{ text: '', border: NB }, 'Договор подряда (контракт)      номер', s(st.contractNo)],
+      [{ text: '', border: NB }, 'дата', C.fmtDate(st.contractDate)],
+      [{ text: '', border: NB }, 'Вид операции', s(ks.opType)]
     ];
+    const box = [true, true, true, true];
     const tb = [
-      [{ text: '', border: NB }, { text: 'Форма по ОКУД', border: NB, alignment: 'right' }, { text: okud, border: [true, true, true, true], alignment: 'center' }]
+      [{ text: '', border: NB }, { text: 'Форма по ОКУД', border: NB, alignment: 'right' }, { text: okud, border: box, alignment: 'center', bold: true }]
     ];
-    rows.forEach(r => {
-      const isCap = r[0].startsWith('(');
-      tb.push([
-        isCap ? { text: r[0], border: NB, fontSize: 6.5, italics: true, alignment: 'center' } : { text: r[0], border: r[0] ? BB : NB },
-        { text: r[1], border: NB, alignment: 'right', fontSize: 8 },
-        { text: r[2], border: isCap ? [true, false, true, false] : [true, true, true, true], alignment: 'center' }
-      ]);
+    rows.forEach(([left, lbl, code]) => {
+      // подпись «по ОКПО» и код — на уровне подчёркнутой строки, а не пояснения
+      const party_ = !!left.stack;
+      tb.push([left, { text: lbl, border: NB, alignment: 'right', fontSize: 8, margin: [0, party_ ? 2 : 0, 0, 0] }, { text: code || ' ', border: box, alignment: 'center', margin: [0, party_ ? 2 : 0, 0, 0] }]);
     });
     return [
       { text: 'Унифицированная форма № ' + form + '\nУтверждена постановлением Госкомстата России\nот 11.11.99 № 100', alignment: 'right', fontSize: 7.5 },
-      { table: { widths: ['*', 130, 90], body: [[{ text: '', border: NB }, { text: '', border: NB }, { text: 'Код', border: [true, true, true, true], alignment: 'center', bold: true }]].concat(tb) }, layout: UL, margin: [0, 4, 0, 6] },
+      { table: { widths: portrait ? ['*', 100, 70] : ['*', 130, 90], body: [[{ text: '', border: NB }, { text: '', border: NB }, { text: 'Код', border: [true, true, true, true], alignment: 'center', bold: true }]].concat(tb) }, layout: UL, margin: [0, 4, 0, 6] },
       {
         table: {
           widths: ['*', 80, 80, 70, 70],
           body: [
             [{ text: '', border: NB }, { text: 'Номер документа', alignment: 'center', fontSize: 8, border: [true, true, true, true], rowSpan: 2 }, { text: 'Дата составления', alignment: 'center', fontSize: 8, border: [true, true, true, true], rowSpan: 2 }, { text: 'Отчетный период', alignment: 'center', fontSize: 8, colSpan: 2, border: [true, true, true, true] }, {}],
             [{ text: '', border: NB }, {}, {}, { text: 'с', alignment: 'center', fontSize: 8, border: [true, true, true, true] }, { text: 'по', alignment: 'center', fontSize: 8, border: [true, true, true, true] }],
-            [{ text: kind === 'КС-2' ? 'АКТ' : 'СПРАВКА', bold: true, fontSize: 13, alignment: 'right', border: NB }, { text: s(ks.number), alignment: 'center', bold: true, border: [true, true, true, true] }, { text: C.fmtDate(ks.date), alignment: 'center', border: [true, true, true, true] }, { text: C.fmtDate(ks.periodFrom), alignment: 'center', border: [true, true, true, true] }, { text: C.fmtDate(ks.periodTo), alignment: 'center', border: [true, true, true, true] }]
+            [{ text: '', border: NB }, { text: s(ks.number), alignment: 'center', bold: true, border: [true, true, true, true] }, { text: C.fmtDate(ks.date), alignment: 'center', border: [true, true, true, true] }, { text: C.fmtDate(ks.periodFrom), alignment: 'center', border: [true, true, true, true] }, { text: C.fmtDate(ks.periodTo), alignment: 'center', border: [true, true, true, true] }]
           ]
         }, layout: UL
       },
-      { text: kind === 'КС-2' ? 'О ПРИЕМКЕ ВЫПОЛНЕННЫХ РАБОТ' : 'О СТОИМОСТИ ВЫПОЛНЕННЫХ РАБОТ И ЗАТРАТ', bold: true, alignment: 'center', fontSize: 12, margin: [0, 4, 0, 6] }
+      // «АКТ» / «СПРАВКА» — по центру, прямо над названием документа
+      { text: kind === 'КС-2' ? 'АКТ' : 'СПРАВКА', bold: true, alignment: 'center', fontSize: 13, margin: [0, 6, 0, 0] },
+      { text: kind === 'КС-2' ? 'О ПРИЕМКЕ ВЫПОЛНЕННЫХ РАБОТ' : 'О СТОИМОСТИ ВЫПОЛНЕННЫХ РАБОТ И ЗАТРАТ', bold: true, alignment: 'center', fontSize: 12, margin: [0, 0, 0, 6] }
     ];
   }
 
@@ -780,26 +796,38 @@
     const tot = C.ksTotals(p);
     const body = [
       [{ text: 'Номер', colSpan: 2 }, {}, { text: 'Наименование работ', rowSpan: 2 }, { text: 'Номер единичной расценки', rowSpan: 2 }, { text: 'Единица измерения', rowSpan: 2 }, { text: 'Выполнено работ', colSpan: 3 }, {}, {}],
-      ['по порядку', 'позиции по смете', {}, {}, {}, 'количество', 'цена за единицу, руб.', 'стоимость, руб.'],
+      ['по порядку', 'позиции по смете', {}, {}, {}, 'количество', 'цена за единицу, руб.' + (ks.ks2Style !== 'smeta' ? ' (без НДС)' : ''), 'стоимость, руб.' + (ks.ks2Style !== 'smeta' ? ' (без НДС)' : '')],
       nums(8)
     ].map((r, i) => i < 2 ? r.map(c => typeof c === 'string' ? { text: c, bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' } : (c.text !== undefined ? Object.assign({ bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' }, c) : c)) : r);
-    let n = 0;
     const all = p.smeta.filter(r => r.name);
-    C.ksItems(p).forEach(({ r, qty, c }) => {
-      n++;
+    const items = C.ksItems(p);
+    // «как в КС-3» (по умолчанию): цена и стоимость без НДС, внизу «Итого», «Сумма НДС», «Всего с учетом НДС» — итоги совпадают с КС-3.
+    // «как в смете» (ks.ks2Style = 'smeta'): в ценах сметы
+    const asKs3 = ks.ks2Style !== 'smeta';
+    let sums = items.map(({ c }) => asKs3 ? C.netOf(p, c.total) : c.total);
+    // копейки округления — на последнюю строку, чтобы сумма строк = «Итого»
+    if (asKs3 && sums.length) sums[sums.length - 1] = C.round2(sums[sums.length - 1] + tot.net - sums.reduce((a, x) => a + x, 0));
+    items.forEach(({ r, qty, c }, i) => {
+      const unit = asKs3 ? (C.num(qty) ? C.round2(sums[i] / C.num(qty)) : sums[i]) : c.unitPrice;
       // «позиция по смете» — номер строки в полной смете, даже если в КС вошли не все позиции
-      body.push([{ text: String(n), alignment: 'center' }, { text: String(all.indexOf(r) + 1), alignment: 'center' }, s(r.name), { text: 'договорн.', alignment: 'center' }, { text: s(r.unit), alignment: 'center' }, R(C.qty(qty)), R(C.money(c.unitPrice)), R(C.money(c.total))]);
+      body.push([{ text: String(i + 1), alignment: 'center' }, { text: String(all.indexOf(r) + 1), alignment: 'center' }, s(r.name), { text: 'договорн.', alignment: 'center' }, { text: s(r.unit), alignment: 'center' }, R(C.qty(qty)), R(C.money(unit)), R(C.money(sums[i]))]);
     });
-    const tr = (t, v) => [{ text: t, colSpan: 7, alignment: 'right', bold: true }, {}, {}, {}, {}, {}, {}, R(v, { bold: true })];
-    body.push(tr('Итого с НДС:', C.money(tot.total)), tr('в т.ч. НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)), tr('Всего с НДС:', C.money(tot.total)));
+    // итоги — как в КС-3: под таблицей справа, ровно под столбцом «стоимость»
+    const tl = asKs3 ? [['Итого', tot.net], ['Сумма НДС ' + tot.vatPct + '%', tot.vatSum], ['Всего с учетом НДС', tot.gross]]
+      // как в смете — цены с НДС: «Итого» + «в т.ч. НДС»; цены без НДС: «Итого», «НДС», «Всего с НДС»
+      : tot.top ? [['Итого (без НДС)', tot.net], ['НДС ' + tot.vatPct + '%', tot.vatSum], ['Всего с НДС', tot.gross]]
+        : [['Итого', tot.gross], ['в т.ч. НДС ' + tot.vatPct + '%', tot.vatSum]];
+    // продолжение той же таблицы: подпись без рамок, сумма — в рамке последнего столбца (ширина как у «стоимости»)
+    tl.forEach(([t, v]) => body.push([{ text: t, colSpan: 7, alignment: 'right', border: NB }, {}, {}, {}, {}, {}, {}, R(C.money(v), { border: [true, true, true, true], bold: true })]));
     return doc([
       ...ksHeader(p, 'КС-2', '0322005', 'КС-2'),
       {
         // договорная стоимость — всего договора (цена договора или вся смета), а не только этого периода
-        table: { widths: ['*', 120], body: [[{ text: 'Сметная (договорная) стоимость в соответствии с договором подряда (субподряда)', border: NB, alignment: 'right' }, { text: C.money(C.num(p.settings.contractPrice) || C.smetaTotals(p, !!ks.worksOnly).total) + ' руб.', border: BB, alignment: 'center' }]] },
+        table: { widths: ['*', 120], body: [[{ text: 'Сметная (договорная) стоимость в соответствии с договором подряда (субподряда)', border: NB, alignment: 'right' }, { text: C.money(C.num(p.settings.contractPrice) || C.smetaTotals(p, !!ks.worksOnly).gross) + ' руб.', border: BB, alignment: 'center' }]] },
         layout: UL, margin: [0, 0, 0, 6]
       },
-      { table: { headerRows: 3, widths: [40, 50, '*', 70, 55, 60, 80, 90], body }, layout: GRID, fontSize: 8.5 },
+      // «Номер»: «по порядку» и «позиции по смете» — одинаковой ширины
+      { table: { headerRows: 3, widths: [48, 48, '*', 70, 55, 60, 80, 90], body }, layout: GRID, fontSize: 8.5 },
       signer2('Сдал', 'Должность визирующего лица от Подрядчика', ks.contractorSignerPos, ks.contractorSignerName, C.parties(p).ksContractor, p),
       signer2('Принял', 'Должность визирующего лица', ks.customerSignerPos, ks.customerSignerName, C.parties(p).ksCustomer, p)
     ], { landscape: true, title: 'КС-2 № ' + s(ks.number), pageNumbers: true, fit: ks.fitOnePage !== false });
@@ -808,36 +836,41 @@
   function ks3Doc(p) {
     const ks = p.ks;
     const tot = C.ksTotals(p);
+    // по бланку КС-3 суммы в таблице — без НДС, ниже «Итого», «Сумма НДС», «Всего с учетом НДС»
+    const net = x => C.netOf(p, x);
     // нарастающий итог: закрытые раньше КС + эта
-    const fromStart = C.round2(C.ksDoneBefore(p) + tot.total), fromYear = C.round2(C.ksYearBefore(p) + tot.total);
-    const H = t => ({ text: t, bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' });
+    const fromStart = net(C.ksDoneBefore(p) + tot.total), fromYear = net(C.ksYearBefore(p) + tot.total), period = tot.net;
+    const H = t => ({ text: t, bold: true, alignment: 'center', fontSize: 7.5, fillColor: '#f0f0f0' });
     const body = [
       [Object.assign(H('Номер по порядку'), { rowSpan: 2 }), Object.assign(H('Наименование пусковых комплексов, этапов, объектов, видов выполненных работ, оборудования, затрат'), { rowSpan: 2 }), Object.assign(H('Код'), { rowSpan: 2 }), Object.assign(H('Стоимость выполненных работ и затрат, руб.'), { colSpan: 3 }), {}, {}],
       [{}, {}, {}, H('с начала проведения работ'), H('с начала года'), H('в том числе за отчетный период')],
       nums(6),
-      ['', { text: 'Всего работ и затрат, включаемых в стоимость работ, в том числе:', bold: true }, '', R(C.money(fromStart), { bold: true }), R(C.money(fromYear), { bold: true }), R(C.money(tot.total), { bold: true })]
+      ['', { text: 'Всего работ и затрат, включаемых в стоимость работ, в том числе:', bold: true }, '', R(C.money(fromStart), { bold: true }), R(C.money(fromYear), { bold: true }), R(C.money(period), { bold: true })]
     ];
     if (ks.ks3Mode === 'items') {
-      // по позициям сметы — те же строки, что в КС-2, с нарастающим итогом по каждой
+      // по позициям сметы — те же строки, что в КС-2, с нарастающим итогом по каждой (без НДС)
       const year = (C.parseDate(ks.date) || new Date()).getFullYear();
       const before = (id, onlyYear) => (p.ksHistory || []).filter(h => !onlyYear || (C.parseDate(h.date) || new Date(0)).getFullYear() === year)
         .reduce((a, h) => a + (h.rows || []).filter(x => x.id === id).reduce((b, x) => b + C.num(x.sum), 0), 0);
-      let n = 0;
-      C.ksItems(p).forEach(({ r, c }) => {
-        n++;
-        body.push([{ text: String(n), alignment: 'center' }, s(r.name), '', R(C.money(before(r.id) + c.total)), R(C.money(before(r.id, true) + c.total)), R(C.money(c.total))]);
-      });
+      const items = C.ksItems(p);
+      const cols = items.map(({ r, c }) => [net(before(r.id) + c.total), net(before(r.id, true) + c.total), net(c.total)]);
+      // копейки округления — на последнюю строку, чтобы строки сходились с итогом
+      if (cols.length) [fromStart, fromYear, period].forEach((t, k) => { const sum = cols.reduce((a, x) => a + x[k], 0); cols[cols.length - 1][k] = C.round2(cols[cols.length - 1][k] + t - sum); });
+      items.forEach(({ r }, i) => body.push([{ text: String(i + 1), alignment: 'center' }, s(r.name), '', R(C.money(cols[i][0])), R(C.money(cols[i][1])), R(C.money(cols[i][2]))]));
     } else {
-      body.push([{ text: '1', alignment: 'center' }, s(ks.stageName) || 'Работы по договору № ' + s(p.settings.contractNo), '', R(C.money(fromStart)), R(C.money(fromYear)), R(C.money(tot.total))]);
+      body.push([{ text: '1', alignment: 'center' }, s(ks.stageName) || 'Работы по договору № ' + s(p.settings.contractNo), '', R(C.money(fromStart)), R(C.money(fromYear)), R(C.money(period))]);
     }
-    const tr = (t, v) => [{ text: t, colSpan: 5, alignment: 'right', bold: true }, {}, {}, {}, {}, R(v, { bold: true })];
-    body.push(tr('Итого с НДС:', C.money(tot.total)), tr('в т.ч. НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)), tr('Всего с учетом НДС:', C.money(tot.total)));
+    // как в бланке: «Итого», «Сумма НДС», «Всего с учетом НДС» — под таблицей справа, под графой отчётного периода
+    // продолжение той же таблицы: подпись без рамок, сумма — в рамке под графой отчётного периода
+    [['Итого', tot.net], ['Сумма НДС ' + tot.vatPct + '%', tot.vatSum], ['Всего с учетом НДС', tot.gross]]
+      .forEach(([t, v]) => body.push([{ text: t, colSpan: 5, alignment: 'right', border: NB }, {}, {}, {}, {}, R(C.money(v), { border: [true, true, true, true], bold: true })]));
+    // книжный лист, как бланк КС-3
     return doc([
       ...ksHeader(p, 'КС-3', '0322001', 'КС-3'),
-      { table: { headerRows: 3, widths: [50, '*', 50, 110, 110, 110], body }, layout: GRID, fontSize: 9 },
+      { table: { headerRows: 3, widths: [30, '*', 30, 72, 72, 72], body }, layout: GRID, fontSize: 8.5 },
       signer2('Сдал', 'Должность визирующего лица от Подрядчика', ks.contractorSignerPos, ks.contractorSignerName, C.parties(p).ksContractor, p),
       signer2('Принял', 'Должность визирующего лица', ks.customerSignerPos, ks.customerSignerName, C.parties(p).ksCustomer, p)
-    ], { landscape: true, title: 'КС-3 № ' + s(ks.number), pageNumbers: true, fit: ks.fitOnePage !== false });
+    ], { title: 'КС-3 № ' + s(ks.number), pageNumbers: true, fit: ks.fitOnePage !== false });
   }
 
   // ---------- вывод ----------

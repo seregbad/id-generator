@@ -6,6 +6,8 @@
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
+  // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
+  const APP_VERSION = '39 (12.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -291,8 +293,8 @@
         F('name', 'Наименование работ и затрат', 'textarea', { req: 1, wide: 1 }),
         F('unit', 'Ед. изм.', 'combo', { opts: units }),
         F('qty', 'Количество', 'number'),
-        F('priceWork', 'Цена работ за ед., с НДС', 'number'),
-        F('priceMat', 'Цена материала за ед., с НДС', 'number')
+        F('priceWork', 'Цена работ за ед., ' + (C.vatTop(P) ? 'без НДС' : 'с НДС'), 'number'),
+        F('priceMat', 'Цена материала за ед., ' + (C.vatTop(P) ? 'без НДС' : 'с НДС'), 'number')
       ],
       row: r => {
         const c = C.smetaRow(r), before = C.qtyDoneBefore(P, r.id);
@@ -801,7 +803,7 @@
         rowButtons: [{ icon: '&#128462;', title: 'PDF этого акта', onClick: a => makeAct(a) },
           { icon: '&#9993;', title: 'Уведомление о вызове на освидетельствование по этому акту', onClick: a => makeNotice([a]) },
           { icon: '&#10549;', title: 'Следующий акт: копия, даты — сразу после этого акта', onClick: a => nextAct(a) }],
-        onCopy: cp => { cp.manualNo = ''; cp.print = ''; },
+        onCopy: cp => { cp.manualNo = ''; cp.print = ''; cp.printedNo = ''; },
         defaults: () => {
           const last = P.acts[P.acts.length - 1];
           const d = last ? { type: last.type, section: last.section, start: last.end || '', end: last.end || '' } : { type: 'АОСР' };
@@ -816,7 +818,7 @@
         const iso = d => d.getFullYear() + '-' + C.pad2(d.getMonth() + 1) + '-' + C.pad2(d.getDate());
         const s0 = C.parseDate(a.start), e0 = C.parseDate(a.end);
         const cp = JSON.parse(JSON.stringify(a));
-        Object.assign(cp, { id: C.uid(), manualNo: '', print: '', actDate: '', matQty: {}, sheetsCount: '', note: '' });
+        Object.assign(cp, { id: C.uid(), manualNo: '', print: '', printedNo: '', actDate: '', matQty: {}, sheetsCount: '', note: '' });
         if (e0) {
           const days = s0 ? Math.round((e0 - s0) / 864e5) : 0;
           const ns = new Date(e0); ns.setDate(ns.getDate() + 1);
@@ -830,7 +832,7 @@
       }
     },
     smeta() {
-      main.appendChild(head('Смета, КС-2, КС-3', 'Цены — с НДС, как в договоре. НДС выделяется «в т.ч.» автоматически.', [
+      main.appendChild(head('Смета, КС-2, КС-3', C.vatTop(P) ? 'Цены — без НДС; НДС начисляется сверху (переключатель — в «Реквизитах КС-2 / КС-3»).' : 'Цены — с НДС, как в договоре; НДС выделяется «в т.ч.» (переключатель — в «Реквизитах КС-2 / КС-3»).', [
         btn('Смета', () => makeDoc('Смета', () => IDPdf.smetaDoc(P))),
         btn('КС-2', () => makeDoc('КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P))),
         btn('КС-3', () => makeDoc('КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P))),
@@ -839,13 +841,14 @@
       ]));
       const kpi = document.createElement('div'); kpi.className = 'kpi';
       const updKpi = () => {
-        const t = C.smetaTotals(P), k = C.ksTotals(P), before = C.ksDoneBefore(P);
-        const price = C.num(P.settings.contractPrice) || C.smetaTotals(P, !!P.ks.worksOnly).total;
-        kpi.innerHTML = '<div><span class="muted small">Смета с НДС</span><b>' + C.money(t.total) + '</b></div>' +
-          '<div><span class="muted small">Работы / материалы</span><b>' + C.money(t.work) + ' / ' + C.money(t.mat) + '</b></div>' +
-          '<div><span class="muted small">КС № ' + esc(P.ks.number || '—') + (C.ksPeriodMode(P) ? ' (объёмы за период)' : ' (вся смета)') + '</span><b>' + C.money(k.total) + '</b></div>' +
+        // все суммы в сводке — с НДС (цена договора тоже с НДС)
+        const t = C.smetaTotals(P), k = C.ksTotals(P), before = C.vatSplit(P, C.ksDoneBefore(P)).gross;
+        const price = C.num(P.settings.contractPrice) || C.smetaTotals(P, !!P.ks.worksOnly).gross;
+        kpi.innerHTML = '<div><span class="muted small">Смета с НДС' + (t.top ? ' (без НДС ' + C.money(t.net) + ')' : '') + '</span><b>' + C.money(t.gross) + '</b></div>' +
+          '<div><span class="muted small">в т.ч. НДС ' + t.vatPct + '%</span><b>' + C.money(t.vatSum) + '</b></div>' +
+          '<div><span class="muted small">КС № ' + esc(P.ks.number || '—') + (C.ksPeriodMode(P) ? ' (объёмы за период)' : ' (вся смета)') + ', с НДС</span><b>' + C.money(k.gross) + '</b></div>' +
           (P.ksHistory.length ? '<div><span class="muted small">Закрыто КС: ' + P.ksHistory.length + '</span><b>' + C.money(before) + '</b></div>' +
-            '<div><span class="muted small">Остаток по договору</span><b>' + C.money(price - before - k.total) + '</b></div>' : '');
+            '<div><span class="muted small">Остаток по договору</span><b>' + C.money(price - before - k.gross) + '</b></div>' : '');
       };
       main.appendChild(card(null, [kpi]));
       const c = card('Позиции сметы', [para('Поле «В этой КС» — объём, выполненный за текущий отчётный период. Если оно заполнено хотя бы у одной позиции, КС-2 и КС-3 формируются только по таким позициям и на эти объёмы. Если везде пусто — на всю смету.')]);
@@ -900,6 +903,8 @@
       drawHist();
       if (P.ks.fitOnePage === undefined) P.ks.fitOnePage = true; // по умолчанию включено
       main.appendChild(card('Реквизиты КС-2 / КС-3', [formGrid(P.ks, [
+        F('vatMode', 'НДС в смете и КС', 'select', { wide: 1, rerender: 1, opts: [{ v: 'top', l: 'Цены без НДС — НДС сверху: «Итого (без НДС)», «НДС», «Всего с НДС»' }], empty: 'Цены с НДС, как в договоре — «Итого» и «в т.ч. НДС» (по умолчанию)', hint: 'КС-3 по бланку всегда: «Итого» (без НДС), «Сумма НДС», «Всего с учетом НДС»' }),
+        F('ks2Style', 'Расчёт в КС-2', 'select', { wide: 1, opts: [{ v: 'smeta', l: 'Как в смете — в ценах сметы, итоги по настройке НДС выше' }], empty: 'Как в КС-3 — цена и стоимость без НДС; «Итого», «Сумма НДС», «Всего с учетом НДС» (по умолчанию)', hint: 'Как в КС-3: суммы КС-2 и КС-3 совпадают до копейки' }),
         F('worksOnly', 'КС-2 и КС-3 только на работы (стоимость материалов не включать)', 'check', { wide: 1 }),
         F('fitOnePage', 'Умещать смету, КС-2 и КС-3 на один лист, если они чуть-чуть не помещаются (шрифт уменьшится, но не меньше 78 %)', 'check', { wide: 1 }),
         F('customerKey', 'Заказчик по КС (Заказчик / Генподрядчик)', 'select', { opts: orgKeys, empty: 'По ролям: ' + ((C.customerOrg(P) || {}).key || 'застройщик не заведён'), hint: 'Если вы субподрядчик — выберите генподрядчика' }),
@@ -912,7 +917,7 @@
         F('stageName', 'Наименование этапа для КС-3 (если одной строкой)', 'textarea', { wide: 1, hint: 'Пусто — «Работы по договору № …»' }),
         F('contractorSignerPos', 'Подписант Подрядчика: должность'), F('contractorSignerName', 'Подписант Подрядчика: Фамилия И.О.'),
         F('customerSignerPos', 'Подписант Заказчика: должность'), F('customerSignerName', 'Подписант Заказчика: Фамилия И.О.')
-      ], updKpi)]));
+      ], f => { if (f.k === 'vatMode') render(); else updKpi(); })]));
     },
     ozhr() {
       const o = P.ozhr;
@@ -1372,8 +1377,11 @@
       }
     }]);
   }
+  // номер на момент печати: проверка комплекта заметит, если он потом сдвинется (удалили / переставили акт выше)
+  function markPrinted(list) { list.forEach(a => { if (a.type) a.printedNo = C.actNumber(P, a); }); touch(); }
   function makeAct(a) {
     if (!a.type) { toast('У акта не указан тип'); return; }
+    markPrinted([a]);
     makeDoc(actFileName(a), () => IDPdf.actDoc(P, a));
   }
   async function makeZip(name, items) {
@@ -1396,6 +1404,7 @@
     let acts = P.acts.filter(a => a.print && a.type);
     const go = (list, m) => {
       if (!list.length) { toast('Нет актов'); return; }
+      markPrinted(list);
       if (m === 'one') makeDoc('Акты ' + (P.settings.objectName || ''), () => IDPdf.actsDoc(P, list));
       else makeZip('Акты', list.map(a => [actFileName(a), () => IDPdf.actDoc(P, a)]));
     };
@@ -1412,6 +1421,7 @@
     } else ask(acts);
   }
   function fullSet() {
+    markPrinted(P.acts);
     const items = P.acts.filter(a => a.type).map(a => ['Акты/' + actFileName(a), () => IDPdf.actDoc(P, a)]);
     items.push(['Реестр ИД', () => IDPdf.registryDoc(P)], ['ЖВК', () => IDPdf.jvkDoc(P)], ['Ведомость материалов', () => IDPdf.balanceDoc(P)], ['Общий журнал работ', () => IDPdf.ozhrDoc(P)]);
     if (P.smeta.some(r => r.name)) items.push(['КС/Смета', () => IDPdf.smetaDoc(P)], ['КС/КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P)], ['КС/КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P)]);
@@ -1523,6 +1533,7 @@
   loadStore();
   render();
   setSaveState('');
+  { const v = $('#appVer'); if (v) v.textContent = 'Версия ' + APP_VERSION + (location.hostname === 'localhost' ? ' · ПК' : ' · ' + location.hostname); }
   migrateFromOldAddress();
   document.dispatchEvent(new Event('idapp-ready'));
   if (location.hash.startsWith('#/import')) render();
