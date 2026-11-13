@@ -321,6 +321,65 @@
     return { code: s(code), docName, designer, projectDoc, source, section };
   }
 
+  // листы раздела РД / тома ПД: [{no, name}] (из ведомости рабочих чертежей или вручную)
+  const rdSheets = (p, section) => { const r = rdSection(p, section); return (r && r.sheetList) || []; };
+  // «листы 1–3, 5, В1»: подряд идущие номера — диапазоном
+  function sheetsText(nos) {
+    const list = (nos || []).map(x => s(x)).filter(Boolean);
+    if (!list.length) return '';
+    const out = []; let i = 0;
+    while (i < list.length) {
+      let j = i;
+      while (j + 1 < list.length && /^\d+$/.test(list[j]) && /^\d+$/.test(list[j + 1]) && +list[j + 1] === +list[j] + 1) j++;
+      out.push(j - i >= 2 ? list[i] + '–' + list[j] : j > i ? list[i] + ', ' + list[j] : list[i]);
+      i = j + 1;
+    }
+    return (list.length > 1 ? 'листы ' : 'лист ') + out.join(', ');
+  }
+  // номера листов из текста «листы 1–3, 5» / «л. 2, 4» → ['1','2','3','5']
+  function sheetsParse(text) {
+    const t = s(text).replace(/^[^0-9А-Яа-яA-Za-z]*(листы|лист|л\.)\s*/i, '');
+    const out = [];
+    t.split(/[,;]\s*/).forEach(part => {
+      const m = /^(\d+)\s*[–—-]\s*(\d+)$/.exec(part.trim());
+      if (m && +m[2] >= +m[1] && +m[2] - +m[1] < 200) for (let k = +m[1]; k <= +m[2]; k++) out.push(String(k));
+      else if (part.trim()) out.push(part.trim().replace(/^(листы|лист|л\.)\s*/i, ''));
+    });
+    return out;
+  }
+  // что исправить в акте из чужой ИД, чтобы он соответствовал нашему формату и данным проекта
+  function importIssues(p, a) {
+    if (!a.imported) return [];
+    const out = [];
+    const v = actView(p, a);
+    const r = rdSection(p, a.section);
+    if (!a.section) out.push('не указан раздел (КЖ, КМ…) — нужен для шифра и нумерации');
+    else if (!r) out.push('раздела «' + a.section + '» нет в «Проектной и рабочей документации»');
+    else if (!r.code) out.push('у раздела «' + a.section + '» не указан шифр');
+    // шифр из их акта не совпадает с нашим (старая редакция или другой раздел)
+    const theirCode = s(a.imported.code);
+    if (theirCode && v.projectCode && compactCode(theirCode) !== compactCode(v.projectCode)) out.push('в исходном акте шифр «' + theirCode + '», в проекте — «' + v.projectCode + '»');
+    // в п. 6 (нормативы) и п. 4 остались ссылки на шифры, которых нет в нашей документации
+    const known = (p.rdSections || []).map(x => compactCode(x.code)).concat([compactCode(v.projectCode)]);
+    [['п. 6', a.manualNorms], ['п. 4', a.docs]].forEach(([pt, txt]) => {
+      // шифр: несколько частей через дефис и буквенный раздел в конце (КЖ1, КМД); оси «1-4/А-В» не считаем
+      (s(txt).match(/[0-9A-Za-zА-ЯЁ][0-9A-Za-zА-ЯЁ.\/]*(?:-[0-9A-Za-zА-ЯЁ.\/]+)+-[А-ЯЁ]{2,5}\s?\d{0,2}(?![А-Яа-яЁё\/\-])/g) || [])
+        .filter(c => !known.includes(compactCode(c))).forEach(c => out.push('в ' + pt + ' ссылка на шифр «' + c + '» — его нет в «Проектной и рабочей документации»'));
+    });
+    const list = rdSheets(p, a.section).map(x => s(x.no));
+    if (list.length && a.sheets) { const bad = sheetsParse(a.sheets).filter(n => !list.includes(n)); if (bad.length) out.push('листов ' + bad.join(', ') + ' нет в ведомости раздела ' + a.section); }
+    if (!a.sheets && list.length) out.push('не выбраны листы РД');
+    const wd = workDates(p);
+    if (a.start && wd.start && a.start < wd.start) out.push('начало работ ' + fmtDate(a.start) + ' раньше начала по договору ' + fmtDate(wd.start));
+    if (a.end && wd.end && a.end > wd.end) out.push('окончание ' + fmtDate(a.end) + ' позже срока по договору ' + fmtDate(wd.end));
+    (a.imported.matsLeft || []).forEach(t => out.push('материал не найден в «Материалах»: ' + t));
+    if ((a.type === 'АОСР' || a.type === 'АООК') && !(a.materials || []).length && !(a.imported.matsLeft || []).length && a.imported.matsText) out.push('материалы из исходного акта не привязаны: ' + a.imported.matsText.slice(0, 120));
+    (a.imported.repsLeft || []).forEach(t => out.push('подписант не найден в «Представителях»: ' + t));
+    v.warnings.forEach(w => out.push(w));
+    return out;
+  }
+  const compactCode = c => s(c).toUpperCase().replace(/[\s.]/g, '').replace(/[ABCEHKMOPTXY]/g, ch => ({ A: 'А', B: 'В', C: 'С', E: 'Е', H: 'Н', K: 'К', M: 'М', O: 'О', P: 'Р', T: 'Т', X: 'Х', Y: 'У' })[ch]);
+
   function actView(p, a) {
     const st = p.settings;
     const w = p.works.find(x => x.id === a.workId) || null;
@@ -630,6 +689,9 @@
         if (d.date && ks.periodTo && ks.periodTo < d.date && ksItems(p).some(x => x.r.dsId === d.id)) W('#/smeta', 'В КС за период по ' + fmtDate(ks.periodTo) + ' попали работы по ' + lbl + ', подписанному позже.');
       });
     }
+    // акты, загруженные из чужой ИД: что ещё не приведено к нашему формату
+    const imp = p.acts.filter(a => a.imported && !a.importDone && importIssues(p, a).length);
+    if (imp.length) W('#/acts', 'Акты из чужой ИД требуют исправлений: ' + imp.length + ' (в «Журнале актов» — отметка «чужая ИД», список «что исправить» в карточке акта).');
     return out;
   }
 
@@ -642,6 +704,6 @@
     matNo, matName, matLabel, matDocs, matText, matUntil, matExpired,
     workLabel, actNumber, actView, parties, smetaRow, smetaRows, smetaTotals,
     ksPeriodMode, ksItems, ksTotals, vatSplit, netOf, vatTop,
-    unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
+    rdSheets, sheetsText, sheetsParse, importIssues, compactCode, unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
   };
 })(typeof window !== 'undefined' ? window : globalThis);

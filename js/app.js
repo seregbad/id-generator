@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '48 (12.11.2026)';
+  const APP_VERSION = '50 (13.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -240,7 +240,7 @@
           }),
           F('manualName', 'Наименование работ вручную', 'textarea', { wide: 1, ph: w ? w.name : '', hint: 'Пусто — из справочника' }),
           F('axes', 'Оси / участок / отметки', 'text', { wide: 1, hint: a.type === 'Разбивка осей' ? 'В акте разбивки: «произведена разбивка осей …»' : 'Добавляется к наименованию через пробел' }),
-          F('manualNo', '№ вручную', 'text', { ph: C.actNumber(P, a) || 'авто', hint: 'Пусто — номер считается сам' }),
+          F('manualNo', '№ вручную', 'text', { ph: C.actNumber(P, P.acts.find(x => x.id === a.id) || a) || 'авто', hint: 'Пусто — номер считается сам' }),
           F('executor', 'Исполнитель работ', 'select', {
             opts: orgKeys, empty: 'Генподрядчик / подрядчик' + (C.builderOrg(P) ? ': ' + C.builderOrg(P).key : ' (не заведён)'),
             hint: 'Выберите субподрядчика, если работы выполнил он: в акт попадут его реквизиты и представитель с ролью «5. Исполнитель работ»'
@@ -259,7 +259,14 @@
               hint: i === 0 ? 'Обычно не трогайте: подписанты подбираются сами по роли и датам «с/по» в «Представителях». Выбор здесь — если нужен другой человек или даты не подходят.' : (!auto && i < 2 ? C.repMissingReason(P, role, date) : '')
             });
           }),
-          F('sheets', 'Листы проекта', 'text', { hint: (() => { const v = C.actView(P, a); return 'В акте, п. 2: «' + (v.project || '—') + '» — шифр взят: ' + v.rdSource + '. Листы добавляются после шифра.'; })() }),
+          F('sheets', 'Листы проекта', 'text', { rerender: 1, hint: (() => { const v = C.actView(P, a); return 'В акте, п. 2: «' + (v.project || '—') + '» — шифр взят: ' + v.rdSource + '. Листы добавляются после шифра.'; })() }),
+          // листы из перечня раздела ПД / РД — галочками; в поле выше пишется «листы 3–5»
+          ...(C.rdSheets(P, a.section).length ? [F('sheetsPick', 'Выбрать листы раздела ' + a.section, 'checks', {
+            rerender: 1,
+            opts: () => C.rdSheets(P, a.section).map(x => ({ v: String(x.no), l: x.no + ' — ' + x.name })),
+            hint: 'Отмеченные листы попадут в «Листы проекта»'
+          })] : []),
+          F('importDone', 'Акт из чужой ИД приведён к нашему формату — убрать из списка «что исправить»', 'check', { wide: 1, show: () => !!a.imported }),
           F('materials', 'Материалы', 'mats', { wide: 1, show: () => a.type === 'АОСР' || isAOOK }),
           F('forceRegistry', 'Реестр документов о качестве — приложением к акту, даже если документов 5 и меньше (при 6 и больше — всегда, по форме 344/пр)', 'check', { wide: 1, show: () => a.type === 'АОСР' || isAOOK }),
           F('docs', isAOOK ? 'Исполнительные геодезические схемы (п. 5а)' : 'Исполнительные схемы, документы (п. 4)', 'textarea', { wide: 1, ph: w ? w.docs : '' }),
@@ -278,7 +285,21 @@
           F('print', 'Отметить для пакетной печати', 'check', { wide: 1 })
         ];
       },
+      // акт из чужой ИД: что исправить — над полями карточки
+      banner: a => {
+        if (!a.imported) return '';
+        const iss = C.importIssues(P, a);
+        return '<b>Акт из чужой ИД</b> — ' + esc(a.imported.file || '') + (a.imported.no ? ', исходный № ' + esc(a.imported.no) + (a.imported.date ? ' от ' + esc(C.fmtDate(a.imported.date)) : '') : '') +
+          (iss.length ? '<br>Что исправить:<ul>' + iss.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '<br>Замечаний нет — акт соответствует данным проекта.');
+      },
+      onOpen: a => { const list = C.rdSheets(P, a.section).map(x => String(x.no)); a.sheetsPick = C.sheetsParse(a.sheets).filter(n => list.includes(n)); },
       onChange: (a, k) => {
+        if (k === 'sheetsPick') a.sheets = C.sheetsText(a.sheetsPick);
+        if (k === 'section' || k === 'sheets' || k === 'sheetsPick') {
+          // отметки листов — по тексту поля (руками вписанные номера тоже отмечаются)
+          const list = C.rdSheets(P, a.section).map(x => String(x.no));
+          a.sheetsPick = C.sheetsParse(a.sheets).filter(n => list.includes(n));
+        }
         if (k === 'workId') {
           const w = P.works.find(x => x.id === a.workId);
           if (w) { if (!a.type && w.actType) a.type = w.actType; if (!a.section && w.section) a.section = w.section; }
@@ -286,27 +307,40 @@
       },
       row: a => {
         const v = C.actView(P, a);
+        const iss = a.imported && !a.importDone ? C.importIssues(P, a) : [];
         return {
           num: '', title: (a.type ? a.type + ' № ' + v.number + ' — ' : '') + (v.name || 'Без наименования'),
           sub: [a.start || a.end ? C.fmtDate(a.start) + ' – ' + C.fmtDate(a.end) : '', v.date ? 'акт от ' + C.fmtDate(v.date) : '', v.signers].filter(Boolean).join(' · '),
-          badges: v.warnings.map(w => ({ t: w, c: 'warn' })),
-          warn: v.warnings.length > 0
+          badges: (a.imported ? [{ t: 'чужая ИД' + (a.imported.no ? ', исх. № ' + a.imported.no : ''), c: a.importDone ? 'ok' : '' }, iss.length ? { t: 'исправить: ' + iss.length, c: 'warn' } : null] : [])
+            .concat(v.warnings.map(w => ({ t: w, c: 'warn' }))),
+          warn: v.warnings.length > 0 || iss.length > 0
         };
       },
-      search: a => { const v = C.actView(P, a); return [v.number, v.name, a.type, a.section].join(' '); }
+      search: a => { const v = C.actView(P, a); return [v.number, v.name, a.type, a.section, a.imported ? 'чужая ид' + (a.importDone ? '' : ' исправить') : ''].join(' '); }
     },
     rdSections: {
-      title: 'Разделы РД', one: 'Раздел рабочей документации',
-      fields: () => [
+      title: 'Проектная и рабочая документация', one: 'Раздел ПД / РД',
+      fields: (r) => {
+        // перечень листов редактируется текстом: «№ — наименование» по строке
+        if (r && r.sheetListText === undefined) r.sheetListText = (r.sheetList || []).map(x => x.no + ' — ' + x.name).join('\n');
+        return [
         F('section', 'Раздел', 'combo', { req: 1, opts: () => P.lists.sections, hint: 'Как в поле «Раздел» видов работ и актов: КЖ, КМ, АР…' }),
-        F('code', 'Шифр раздела РД', 'text', { req: 1, hint: 'Как в штампе чертежей, например 038-2024-КЖ0' }),
+        F('stage', 'Стадия', 'select', { opts: [{ v: 'П', l: 'П — проектная документация' }], empty: 'Р — рабочая документация (по умолчанию)' }),
+        F('code', 'Шифр', 'text', { req: 1, hint: 'Как в штампе, например 038-2024-КЖ0' }),
         F('docName', 'Наименование раздела', 'text', { wide: 1, ph: P.settings.projectDocName || '', hint: 'Например: Рабочая документация. Конструкции железобетонные. Пусто — наименование из «Объекта и договора»' }),
-        F('designerKey', 'Проектировщик раздела', 'select', { opts: orgKeys, empty: 'Проектировщик объекта' + (C.designerOrg(P) ? ': ' + C.designerOrg(P).key : ''), hint: 'Если раздел разрабатывала другая организация' })
-      ],
+        F('designerKey', 'Проектировщик раздела', 'select', { opts: orgKeys, empty: 'Проектировщик объекта' + (C.designerOrg(P) ? ': ' + C.designerOrg(P).key : ''), hint: 'Если раздел разрабатывала другая организация' }),
+        F('sheetListText', r && r.stage === 'П' ? 'Тома / разделы' : 'Листы (по строке: «№ — наименование»)', 'textarea', { wide: 1, hint: 'Заполняется при загрузке РД (ведомость рабочих чертежей или штампы). В акте листы выбираются галочками' })
+      ];
+      },
+      onChange: (r, k) => {
+        if (k === 'sheetListText') r.sheetList = String(r.sheetListText || '').split('\n').map(l => l.trim()).filter(Boolean)
+          .map(l => { const m = /^([0-9A-Za-zА-Яа-я.\-]{1,8})\s*[—–\-.:)]\s*(.*)$/.exec(l); return m ? { no: m[1], name: m[2] } : { no: l.split(/\s+/)[0], name: l.split(/\s+/).slice(1).join(' ') }; });
+      },
       row: r => ({
         title: (r.section || '?') + ' — шифр ' + (r.code || 'не указан'),
         sub: C.rdFor(P, { section: r.section }, null).projectDoc,
-        badges: [P.works.filter(w => w.section === r.section).length ? { t: 'видов работ: ' + P.works.filter(w => w.section === r.section).length } : { t: 'нет видов работ с этим разделом', c: 'warn' }]
+        badges: [{ t: r.stage === 'П' ? 'ПД' : 'РД', c: 'ok' }, (r.sheetList || []).length ? { t: (r.stage === 'П' ? 'томов: ' : 'листов: ') + r.sheetList.length } : null,
+          P.works.filter(w => w.section === r.section).length ? { t: 'видов работ: ' + P.works.filter(w => w.section === r.section).length } : { t: 'нет видов работ с этим разделом', c: 'warn' }]
       }),
       search: r => [r.section, r.code, r.docName].join(' ')
     },
@@ -461,6 +495,14 @@
       $('input', wrap).addEventListener('change', e => onInput(f, e.target.checked));
       return wrap;
     }
+    // несколько галочек (например, листы РД для акта): значение — массив отмеченных
+    if (f.t === 'checks') {
+      wrap.className = 'field wide';
+      const cur = Array.isArray(v) ? v.map(String) : [];
+      wrap.innerHTML = '<span>' + esc(f.l) + '</span><div class="checks">' + optList(f).map(o => '<label class="check"><input type="checkbox" value="' + esc(o.v) + '"' + (cur.includes(String(o.v)) ? ' checked' : '') + '> ' + esc(o.l) + '</label>').join('') + '</div>' + (f.hint ? '<small>' + esc(f.hint) + '</small>' : '');
+      wrap.addEventListener('change', () => onInput(f, Array.from(wrap.querySelectorAll('input:checked')).map(x => x.value), true));
+      return wrap;
+    }
     wrap.innerHTML = '<span>' + esc(f.l) + (f.req ? ' <b>*</b>' : '') + '</span>';
     let input;
     if (f.t === 'textarea') {
@@ -595,7 +637,10 @@
     const body = document.createElement('div');
     const draw = () => {
       body.innerHTML = '';
+      const bn = sc.banner && sc.banner(work);
+      if (bn) { const b = document.createElement('div'); b.className = 'row-note editor-banner'; b.innerHTML = '<span>' + bn + '</span>'; body.appendChild(b); }
       const g = document.createElement('div'); g.className = 'grid';
+      if (sc.onOpen && !work._opened) { work._opened = 1; sc.onOpen(work); }
       sc.fields(work).forEach(f => {
         if (f.show && !f.show(work)) return;
         g.appendChild(fieldEl(f, work, (ff, val, rerender) => {
@@ -627,6 +672,7 @@
           if (P.orgs.some(o => o !== item && o.key === work.key)) { toast('Ключ «' + work.key + '» уже занят другой организацией'); return; }
           if (!isNew && item.key && item.key !== work.key) renameOrgKey(item.key, work.key);
         }
+        delete work._opened; delete work.sheetsPick; // служебные поля карточки
         Object.keys(item).forEach(k => delete item[k]);
         Object.assign(item, work);
         if (isNew) arr.push(item);
@@ -850,7 +896,7 @@
       const sc = SCHEMA.works;
       main.appendChild(head(sc.title, sc.intro));
       // разделы РД: шифр подставляется в п. 2 актов по разделу вида работ / акта
-      const rdCard = card('Разделы рабочей документации — шифры', [para('Шифр и наименование раздела попадают в п. 2 актов «Работы выполнены по проектной документации». Акт берёт шифр по своему разделу; если раздел здесь не заведён — общий шифр из «Объекта и договора»' + (P.settings.projectCode ? ' (' + esc(P.settings.projectCode) + ')' : '') + '.')]);
+      const rdCard = card('Проектная и рабочая документация — разделы, шифры, листы', [para('Шифр и наименование раздела попадают в п. 2 актов «Работы выполнены по проектной документации». Акт берёт шифр по своему разделу; если раздел здесь не заведён — общий шифр из «Объекта и договора»' + (P.settings.projectCode ? ' (' + esc(P.settings.projectCode) + ')' : '') + '. Разделы ПД и РД с перечнем листов заводятся сами при загрузке PDF проекта в «Загрузке документов» (по штампам, ведомости рабочих чертежей, составу проекта).')]);
       main.appendChild(rdCard);
       let worksCtl;
       collection(rdCard, 'rdSections', () => P.rdSections, {
