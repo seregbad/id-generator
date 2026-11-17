@@ -204,10 +204,14 @@
     try { out.rules = img ? ruleLines(img, k).map(y => -Math.round(y * sc * 10) / 10) : []; } catch (e) { out.rules = []; }
     return out;
   }
+  // мелкие картинки (скриншот акта с сайта шириной ~600 px) распознаются плохо — увеличиваем до ~1800 px по ширине
   function toCanvas(src) {
     if (src instanceof HTMLCanvasElement) return src;
-    const c = document.createElement('canvas'); c.width = src.naturalWidth || src.width; c.height = src.naturalHeight || src.height;
-    c.getContext('2d').drawImage(src, 0, 0); return c;
+    const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
+    const k = w < 1400 ? Math.min(3, 1800 / w) : 1;
+    const c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
+    const g = c.getContext('2d'); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+    g.drawImage(src, 0, 0, c.width, c.height); return c;
   }
   function loadImage(file) {
     return new Promise((res, rej) => { const u = URL.createObjectURL(file); const im = new Image(); im.onload = () => { res(im); }; im.onerror = () => rej(new Error('Не удалось открыть картинку')); im.src = u; });
@@ -1024,7 +1028,20 @@
   const CODE_RE = /^[0-9A-Za-zА-ЯЁ][0-9A-Za-zА-ЯЁа-яё.\/]*(?:-[0-9A-Za-zА-ЯЁа-яё.\/]+)*-([А-ЯЁ]{1,5})\s?(\d{0,2}(?:\.\d+)?)$/;
   const codeNorm = c => str(c).replace(/([А-ЯЁ])\s+(\d)/g, '$1$2');
   // раздел по шифру: «038-2024-КЖ 0» → КЖ, «07.10.2026-КМД» → КМД, «…-ИОС1» → ИОС1
-  const codeSection = c => { const m = /-([А-ЯЁ]{1,5})\s?(\d{0,2})$/.exec(str(c)); return m ? (/^ИОС$/.test(m[1]) ? m[1] + m[2] : m[1]) : ''; };
+  const codeSection = c => { const m = /-([А-ЯЁ]{1,5})\s?(\d{0,2}(?:\.\d+)*)$/.exec(str(c)); return m ? (/^ИОС$/.test(m[1]) ? m[1] + m[2] : m[1]) : ''; };
+  // склейка кусков одной строки: PDF бывает набран по символам («0» «38» «-» «20» «2» «4» «-» «ОДИ») — пробел только там, где есть зазор
+  function joinItems(arr) {
+    const its = arr.slice().sort((a, b) => a.x - b.x);
+    let out = '', prev = null;
+    its.forEach(i => {
+      const s = str(i.s); if (!s) return;
+      if (prev) { const gap = i.x - (prev.x + (prev.w || prev.s.length * 4)); out += gap > 2.5 ? ' ' : ''; }
+      out += s; prev = Object.assign({}, i, { s });
+    });
+    return out.replace(/\s+/g, ' ').trim();
+  }
+  // строки страницы с склеенными кусками (сверху вниз)
+  const pageLines = page => page.slice().sort((a, b) => b.y - a.y).map(l => ({ y: l.y, items: l.items || [], text: joinItems(l.items || []) }));
   // штамп листа (ГОСТ Р 21.101, формы 3 и 5): шифр, стадия, № листа, наименование листа, объект, организация
   function stampOf(page) {
     const items = page.flatMap(l => l.items || []).map(i => Object.assign({}, i, { s: str(i.s) }));
@@ -1033,7 +1050,19 @@
     if (!izm || !st) return null;
     const x0 = izm.x - 15;
     const near = (a, b, d) => Math.abs(a - b) < d;
-    const code = items.filter(i => i.x >= x0 && i.y > izm.y && i.y < izm.y + 120 && CODE_RE.test(i.s)).sort((a, b) => b.s.length - a.s.length)[0];
+    let code = items.filter(i => i.x >= x0 && i.y > izm.y && i.y < izm.y + 120 && CODE_RE.test(i.s)).sort((a, b) => b.s.length - a.s.length)[0];
+    if (!code) {
+      // шифр разбит на куски («07.10.2026-» + «КМД») — склеиваем куски одной строки
+      const rows = new Map();
+      items.filter(i => i.x >= x0 && i.y > izm.y && i.y < izm.y + 120).forEach(i => { const k = Math.round(i.y / 3); (rows.get(k) || rows.set(k, []).get(k)).push(i); });
+      rows.forEach(arr => {
+        // по зазорам (символы вплотную — одно слово), запасной вариант — склейка вокруг дефисов
+        [joinItems(arr), arr.sort((a, b) => a.x - b.x).reduce((acc, i) => acc + (acc && !/[-.\/]$/.test(acc) && !/^[-.\/]/.test(i.s) ? ' ' : '') + i.s, '').trim()].forEach(s => {
+          const m = /[0-9A-Za-zА-ЯЁ][0-9A-Za-zА-ЯЁа-яё.\/]*(?:-[0-9A-Za-zА-ЯЁа-яё.\/]+)*-[А-ЯЁ]{1,5}\s?\d{0,2}(?:\.\d+)?$/.exec(s);
+          if (m && (!code || m[0].length > code.s.length)) code = { x: arr[0].x, y: arr[0].y, s: m[0] };
+        });
+      });
+    }
     if (!code) return null;
     const stage = items.find(i => /^(П|Р|РД|ПД)$/.test(i.s) && near(i.x, st.x + 15, 35) && i.y < st.y && i.y > st.y - 40);
     const lhdr = items.find(i => /^Лист$/.test(i.s) && i.x > st.x && near(i.y, st.y, 4));
@@ -1041,7 +1070,8 @@
     const dHdr = items.find(i => /^Дата$/.test(i.s) && near(i.y, izm.y, 4));
     const x1 = dHdr ? dHdr.x + 25 : izm.x + 200, x2 = st.x - 5;
     const stageY = stage ? stage.y : st.y - 20;
-    const join = arr => arr.sort((a, b) => b.y - a.y || a.x - b.x).map(i => i.s).join(' ').replace(/\s+/g, ' ').trim();
+    // текст области штампа: строки сверху вниз, куски строки — по зазорам
+    const join = arr => { const rows = new Map(); arr.forEach(i => { const k = Math.round(i.y / 3); (rows.get(k) || rows.set(k, []).get(k)).push(i); }); return Array.from(rows.entries()).sort((a, b) => b[0] - a[0]).map(([, r]) => joinItems(r)).join(' ').replace(/\s+/g, ' ').trim(); };
     const junk = /^(Копировал|Формат|A[0-4]|А[0-4]|Взам|Инв|Подп)/i;
     return {
       code: codeNorm(code.s), stage: stage ? stage.s.replace(/Д$/, '') : '', sheet: sheet ? sheet.s : '',
@@ -1049,6 +1079,18 @@
       name: join(items.filter(i => i.x > x1 && i.x < x2 && i.y < stageY - 3 && !junk.test(i.s))),
       org: join(items.filter(i => i.x >= st.x - 10 && i.y < stageY - 3 && !junk.test(i.s) && i !== sheet))
     };
+  }
+  // штамп и на листах, развёрнутых на 90° (чертежи КМД и т.п.): поворачиваем координаты слов обратно
+  function stampOfAny(page) {
+    const sp = stampOf(page);
+    if (sp) return sp;
+    const items = page.flatMap(l => l.items || []);
+    if (!items.some(i => /^Стадия$/.test(str(i.s)))) return null;
+    for (const f of [i => ({ x: i.y, y: -i.x }), i => ({ x: -i.y, y: i.x })]) {
+      const r = stampOf([{ y: 0, items: items.map(i => Object.assign({}, i, f(i))) }]);
+      if (r) return r;
+    }
+    return null;
   }
   // таблица по заголовку: первый столбец — номер (листа / тома), дальше — текст до «Примечания»
   function sheetTable(page, titleRe, firstRe) {
@@ -1085,12 +1127,54 @@
     }
     return out;
   }
+  // таблица томов: строка начинается номером тома в первом столбце; обозначение и наименование — по столбцам заголовка
+  function volumesOf(page) {
+    const lines = page.slice().sort((a, b) => b.y - a.y);
+    const hi = lines.findIndex(l => { const t = joinItems(l.items || []); return /Обозначение/i.test(t) && /Наименование/i.test(t); });
+    if (hi < 0) return [];
+    const hdr = lines[hi].items;
+    const noH = hdr.find(i => /^(Номер|№)/i.test(str(i.s))) || hdr.slice().sort((a, b) => a.x - b.x)[0];
+    const codeH = hdr.find(i => /^Обозначение/i.test(str(i.s))), nameH = hdr.find(i => /^Наименование/i.test(str(i.s))), noteH = hdr.find(i => /^Прим/i.test(str(i.s)));
+    const out = []; let last = null, prevY = lines[hi].y;
+    for (let k = hi + 1; k < lines.length; k++) {
+      const l = lines[k]; const its = (l.items || []).filter(i => str(i.s));
+      if (!its.length) continue;
+      if (prevY - l.y > 45) break;
+      prevY = l.y;
+      if (/^\s*(тома|\d\s+\d\s+\d)\s*$/i.test(joinItems(its))) continue;
+      const noIt = its.find(i => i.x < codeH.x - 5 && /^\d{1,3}(\.\d+)?$/.test(str(i.s)));
+      // граница «Обозначение | Наименование»: заголовок наименования стоит по центру, текст начинается левее
+      const code = joinItems(its.filter(i => i !== noIt && i.x >= codeH.x - 40 && i.x < nameH.x - 40));
+      const name = joinItems(its.filter(i => i.x >= nameH.x - 40 && (!noteH || i.x < noteH.x - 5)));
+      if (noIt && code) { last = { no: str(noIt.s), code: codeNorm(code), name }; out.push(last); }
+      else if (last && name && !code) last.name = (last.name.replace(/-$/, '') + (/-$/.test(last.name) ? '' : ' ') + name).trim();
+    }
+    return out.filter(v => CODE_RE.test(v.code));
+  }
+  // титульный лист тома ПД / РД
+  function titleOf(page) {
+    const L = pageLines(page);
+    const all = L.map(l => l.text).join('\n');
+    if (!/(ПРОЕКТНАЯ|РАБОЧАЯ)\s+ДОКУМЕНТАЦИЯ/i.test(all) || !/Раздел\s*\d/i.test(all)) return null;
+    if (L.some(l => /^Изм\.?(\s|$)/.test(l.text))) return null; // это лист с штампом, не титул
+    const code = L.map(l => l.text.replace(/\s+/g, '')).find(t => CODE_RE.test(t) && t.length >= 6);
+    if (!code) return null;
+    const ri = L.findIndex(l => /^Раздел\s*\d/i.test(l.text));
+    let name = ri >= 0 ? L[ri].text : '';
+    // продолжение наименования — следующая строка, если это не шифр и не «Том»
+    if (ri >= 0 && L[ri + 1] && !/^Том\b/i.test(L[ri + 1].text) && !CODE_RE.test(L[ri + 1].text.replace(/\s+/g, '')) && /^[а-яё]/.test(L[ri + 1].text)) name += ' ' + L[ri + 1].text;
+    const vol = (/(?:^|\n)\s*Том\s*(\d+(?:\.\d+)?)/i.exec(all) || [])[1] || '';
+    const org = (L.find(l => /^(ООО|АО|ЗАО|ПАО|ИП)\s*[«"]/.test(l.text)) || {}).text || '';
+    const gipL = L.find(l => /Главный\s+инженер\s+проекта/i.test(l.text));
+    const gip = gipL ? str(gipL.text.replace(/Главный\s+инженер\s+проекта/i, '')) : '';
+    return { code: codeNorm(code), name: name.replace(/\s*\.\s*/g, '. ').replace(/(\d)\s+(\d)/g, '$1$2').replace(/\s+/g, ' ').trim(), volume: vol, org, gip };
+  }
   // разбор комплекта РД / ПД: разделы по шифрам со списком листов
   function rdParse(text, layout) {
     const groups = new Map();
     const get = code => { const k = C.compactCode(code); if (!groups.has(k)) groups.set(k, { code, section: codeSection(code), stage: '', docName: '', org: '', object: '', sheets: [], fromList: false }); return groups.get(k); };
     (layout || []).forEach(page => {
-      const sp = stampOf(page);
+      const sp = stampOfAny(page);
       if (sp) {
         const g = get(sp.code);
         if (sp.stage && !g.stage) g.stage = sp.stage;
@@ -1108,22 +1192,72 @@
     if (dn && out.length === 1) out[0].docName = 'Рабочая документация. ' + str(dn[2]);
     const SEC_NAMES = { КЖ: 'Конструкции железобетонные', КМ: 'Конструкции металлические', КМД: 'Конструкции металлические деталировочные', КД: 'Конструкции деревянные', АР: 'Архитектурные решения', АС: 'Архитектурно-строительные решения', КР: 'Конструктивные решения', ОВ: 'Отопление, вентиляция и кондиционирование', ВК: 'Водопровод и канализация', НВК: 'Наружные сети водоснабжения и канализации', ЭОМ: 'Силовое электрооборудование и электроосвещение', ЭС: 'Электроснабжение', ГП: 'Генеральный план', ПЗУ: 'Схема планировочной организации земельного участка', АД: 'Автомобильные дороги', ТХ: 'Технологические решения', ПОС: 'Проект организации строительства' };
     out.forEach(g => { if (!g.docName) g.docName = (g.stage === 'П' ? 'Проектная документация' : 'Рабочая документация') + (SEC_NAMES[g.section] ? '. ' + SEC_NAMES[g.section] : ''); });
-    // ПД: «Состав проектной документации» — тома с обозначениями
+    // ПД: «Состав проектной документации» — таблица томов «Номер тома | Обозначение | Наименование»
+    // (заголовок «Состав…» бывает в штампе внизу листа, таблица — вверху)
     const vols = [];
-    (layout || []).forEach(page => sheetTable(page, /^Состав\s+проект/i, /^(Номер|№)/).forEach(v => { if (v.code) vols.push(v); }));
-    vols.forEach(v => { const g = get(v.code); g.stage = 'П'; g.docName = 'Проектная документация. ' + v.name; g.volume = v.no; if (!out.includes(g)) out.push(g); });
+    (layout || []).forEach(page => { if (page.some(l => /Состав\s+проектной\s+документации/i.test(joinItems(l.items || [])))) volumesOf(page).forEach(v => vols.push(v)); });
+    // титульные листы томов: «ПРОЕКТНАЯ ДОКУМЕНТАЦИЯ / Раздел 11. … / 038-2024-ОДИ / Том 6», ГИП
+    const titles = (layout || []).map(titleOf).filter(Boolean);
+    const addVol = (code, no, name, org) => {
+      // шифр из «Состава проекта» / титула — основной
+      const g = get(code); g.stage = 'П'; g.authoritative = true;
+      g.docName = 'Проектная документация. ' + name.replace(/\s+/g, ' ').trim(); if (no) g.volume = no; if (org && !g.org) g.org = org;
+      if (!out.includes(g)) out.push(g);
+    };
+    // «Состав проекта» вшит в каждый том: весь перечень берём только из ПЗ (или если титула нет — это сам «Состав»),
+    // в остальных томах — только строку своего раздела
+    const ownCodes = titles.map(t => C.compactCode(t.code));
+    const fullList = !titles.length || titles.some(t => /-ПЗ$/.test(t.code));
+    vols.filter(v => fullList || ownCodes.includes(C.compactCode(v.code))).forEach(v => addVol(v.code, v.no, v.name));
+    titles.forEach(t => addVol(t.code, t.volume, t.name, t.org));
+    // в томе с титулом штампы чужих разделов (лист «Состав проекта» — шифр …-СП и т.п.) не нужны
+    if (titles.length) for (let i = out.length - 1; i >= 0; i--) if (!out[i].authoritative && out[i].stage === 'П' && !ownCodes.some(c => c.startsWith(C.compactCode(out[i].code).replace(/\d+$/, '')))) out.splice(i, 1);
+    // разделы, которые не нужны в справочнике: сам «Состав проекта», изыскания внутри ПЗ (ИГИ: С, Т, Г…)
+    for (let i = out.length - 1; i >= 0; i--) { const g = out[i]; if (/^(СП|ИС)$/.test(g.section) || g.section.length < 2 || /-(ИГИ|ИГДИ|ИЭИ|ИГМИ)\b/i.test(g.code)) out.splice(i, 1); }
+    // для ПД листы со штампов текстовой части — шум; оставляем перечень, только если это графическая часть
+    out.forEach(g => { g.sheets.forEach(x => { x.name = str(x.name.replace(/(?:ООО|АО|ЗАО|ПАО)\s*[«"][^»"]*[»"]?/g, '').replace(/\s*М\s*1\s*:\s*\d+\.?/g, '').replace(/[.\s]+$/, '')); }); g.sheets = g.sheets.filter((x, k, arr) => x.name && arr.findIndex(y => y.no === x.no && y.name === x.name) === k); });
+    // ПД: в перечень — только графическая часть (листы текстовой части: «Архитектурные решения», «Пояснительная записка», «Содержание тома»)
+    out.forEach(g => { if (g.stage === 'П') g.sheets = g.sheets.filter(x => !/пояснительная\s+записка|текстовая\s+часть|содержание(\s+тома)?$|^состав\s+проект/i.test(x.name) && !(g.docName && norm(g.docName).includes(norm(x.name)) && x.name.length > 6)); });
+    const gip = titles.map(t => t.gip).find(Boolean);
+    if (gip) out.forEach(g => { if (g.stage === 'П' && !g.gip) g.gip = gip; });
     const exp = /положительн[а-яё]+\s+заключени[а-яё]+[^\n]{0,120}?№\s*([0-9A-Za-zА-Яа-я\-\/]+)(?:\s+от\s+(\d{2}\.\d{2}\.\d{4}))?/i.exec(text);
-    return { sections: out, expertise: exp ? 'Положительное заключение экспертизы № ' + exp[1] + (exp[2] ? ' от ' + exp[2] : '') : '' };
+    // ПОС: «продолжительность строительства составляет: Тн = 24 месяца, в т. ч. подготовительный период – 1 месяц»
+    const toMonths = (n, u) => { const v = +String(n).replace(',', '.'); return /дн/i.test(u) ? Math.round(v / 30.4 * 10) / 10 : v; };
+    const dur = /продолжительност[а-яё]*\s+строительства[\s\S]{0,120}?(?:Т[нn]?\s*=\s*)?(\d+(?:[.,]\d+)?)\s*(месяц[а-я]*|мес\.?|(?:рабочих|календарных)?\s*дн[а-я]*)/i.exec(text)
+      || /сроки?\s+строительства[^\n]{0,30}?мес\.?\s*(\d+(?:[.,]\d+)?)()/i.exec(text);
+    const prep = /подготовительн[а-яё]+\s+период[^\d\n]{0,10}(\d+(?:[.,]\d+)?)\s*(месяц[а-я]*|мес\.?|дн[а-я]*)/i.exec(text);
+    const pos = dur ? { months: toMonths(dur[1], dur[2] || 'мес'), prep: prep ? toMonths(prep[1], prep[2]) : '' } : null;
+    return { pos, sections: out, expertise: exp ? 'Положительное заключение экспертизы № ' + exp[1] + (exp[2] ? ' от ' + exp[2] : '') : '' };
   }
   // РД: ведомость / состав проекта, или штампы хотя бы на двух листах (на одном — если листов в файле не больше трёх)
-  const looksRd = (text, layout) => { if (/ведомость\s+рабочих\s+чертежей|состав\s+проектной\s+документации/i.test(text)) return true; const n = (layout || []).filter(stampOf).length; return n >= 2 || (n === 1 && (layout || []).length <= 3); };
+  const looksRd = (text, layout) => { if (/ведомость\s+рабочих\s+чертежей|состав\s+проектной\s+документации/i.test(text)) return true; const n = (layout || []).filter(stampOfAny).length; return n >= 2 || (n === 1 && (layout || []).length <= 3); };
 
   // ================= чужая ИД: акты по форме 344/пр =================
-  const looksIdPack = t => /К\s+освидетельствованию\s+предъявлены|Разрешается\s+производство\s+последующих\s+работ|произведена\s+разбивка\s+осей/i.test(t) && /(?:^|\n)\s*АКТ\s*\n?\s*(?:освидетельствования|разбивки|приемки)/i.test(t);
+  // акт по форме 344/пр (и с огрехами распознавания скана: «AKT» латиницей, пропущенные буквы)
+  const looksIdPack = t => /освидетельствовани[а-яё]*\s+предъявлен|производство\s+последующих\s+работ|произведена\s+разбивка\s+осей/i.test(t) && /(?:^|\n)\s*(?:АКТ|AKT|AКТ|АKТ)\s*\n?\s*(?:освидетельствования|разбивки|приемки)/i.test(t);
+  // типовые слова подписей под строками формы 344/пр
+  const CAPW = /наименовани|реквизит|в\s+случае|случаев|полномоч|фамили|инициал|подтверждающ|сокращенн|сведения\s+о\s+лицах|исполнительные\s+схемы|результаты\s+экспертиз|лабораторных|нормативных|структурные\s+единицы|разделы\s+проектной|подлежащ|инженерно-техническ|саморегулируем|ОГРНИП|национальном\s+реестре|эксплуатаци|участков\s+сетей|безопасность|неотъемлемой|реестр\s+специалист|членство|процессе\s+строительного\s+контроля|иных\s+испытаний|подготовку\s+раздела|правовых\s+актов|технических\s+регламентов|сведения\s+[о0]\s+лицах|осуществ\S*\s+подготовк|(?:проектной|рабочей)\s+документац\S*\)/i;
   const W_ = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').split(' ').join('\\s+'); // фраза → регулярка с любыми пробелами / переносами
+  // типовые огрехи распознавания скана в актах: «000 "» → «ООО "», «340 "» → «ЗАО "», «Nell om» → «№11 от»,
+  // латиница в инициалах «C.B.» → «С.В.», подчёркивания и «°» вокруг дат
+  function ocrFixAct(t) {
+    const L2C = { A: 'А', B: 'В', C: 'С', E: 'Е', H: 'Н', K: 'К', M: 'М', O: 'О', P: 'Р', T: 'Т', X: 'Х', Y: 'У' };
+    return String(t || '')
+      .replace(/[“”„‟″°]/g, '"').replace(/_+/g, ' ').replace(/[|]{1,}/g, ' ')
+      .replace(/(^|[\s,(])0{3}(?=\s*["«])/g, '$1ООО').replace(/(^|[\s,(])(?:340|3АО|ЗA0|3A0)(?=\s*["«])/g, '$1ЗАО').replace(/(^|[\s,(])(?:AO|А0|A0)(?=\s*["«])/g, '$1АО')
+      .replace(/\bN[eеo°]\s*([lI1|]+)(?=[\s\d-])/g, (m, d) => '№' + d.replace(/[lI|]/g, '1')).replace(/\bN[eеo°]\s*(?=\d)/g, '№').replace(/\bNo\s*(?=\d)/g, '№')
+      .replace(/\b[oо]m\s+(?=\d{1,2}\.\d{2}\.\d{2,4})/g, 'от ')
+      // «Иванов C.B.» / «Александров AM,» → кириллица с точками
+      .replace(/([А-ЯЁ][а-яё]{2,})\s+([A-ZА-ЯЁ])\.?\s*([A-ZА-ЯЁ])\.?(?=[\s,]|$)/g, (m, f, a, b) => f + ' ' + (L2C[a] || a) + '.' + (L2C[b] || b) + '.')
+      .replace(/№\s*([CС])-(\d{2})-(\d{4,6})/g, '№ С-$2-$3');
+  }
+  // мусорная строка распознавания (латинская «каша» вместо подписи под строкой)
+  const ocrJunk = l => { const letters = (l.match(/[A-Za-zА-Яа-яЁё]/g) || []).length; const lat = (l.match(/[a-z]/g) || []).length; return letters > 4 && lat / letters > 0.5 && !/\d{3}/.test(l); };
   function idParse(text) {
+    // кавычки в датах бывают любые: «17», "17", “17”
+    text = ocrFixAct(String(text || '').replace(/[“”„‟″]/g, '"'));
     const t = String(text || '').replace(/ /g, ' ');
-    const startRe = /(?:^|\n)\s*АКТ\s*\n?\s*(освидетельствования\s+скрытых\s+работ|освидетельствования\s+ответственных\s+конструкций|освидетельствования\s+геодезической\s+разбивочной\s+основы|разбивки\s+осей|приемки\s+геодезической\s+разбивочной\s+основы)/gi;
+    const startRe = /(?:^|\n)\s*(?:АКТ|AKT|AКТ|АKТ)\s*\n?\s*(освидетельствования\s+скрытых\s+работ|освидетельствования\s+ответственных\s+конструкций|освидетельствования\s+геодезической\s+разбивочной\s+основы|разбивки\s+осей|приемки\s+геодезической\s+разбивочной\s+основы)/gi;
     const starts = []; let m;
     while ((m = startRe.exec(t))) starts.push({ i: m.index, kind: m[1].toLowerCase() });
     // преамбула акта (объект, участники) стоит перед «АКТ» — для представителей берём текст после «АКТ»
@@ -1131,11 +1265,14 @@
       let chunk = t.slice(st.i, k + 1 < starts.length ? starts[k + 1].i : undefined);
       const type = /скрытых/.test(st.kind) ? 'АОСР' : /ответственных/.test(st.kind) ? 'АООК' : /разбивки\s+осей/.test(st.kind) ? 'Разбивка осей' : 'ГРО';
       // убрать подписи под строками: «(наименование скрытых работ)», «(должность …)» — от строки «(» до строки с «)»
-      const clean = s => { const out = []; let cap = false; String(s || '').split('\n').forEach(l => { const x = l.trim(); if (!cap && /^\(/.test(x)) cap = !/\)\s*$/.test(x); else if (cap) { if (/\)\s*$/.test(x)) cap = false; } else if (x) out.push(x); }); return out.join(' ').replace(/\s+/g, ' ').trim(); };
+      // подпись бывает разорвана содержимым: «(наименования материалов,» ⏎ «сертификат № …» ⏎ «реквизиты сертификатов…)» —
+      // строка внутри «подписи» без её типовых слов — это содержимое
+      // (подпись остаётся «открытой» до строки с «)», содержимое внутри неё сохраняем)
+      const clean = s => { const out = []; let cap = false; String(s || '').split('\n').forEach(l => { const x = l.trim(); if (!x || ocrJunk(x)) return; if (!cap && /^\(/.test(x)) { cap = !/\)\s*$/.test(x); return; } if (cap && CAPW.test(x)) { if (/\)\s*$/.test(x)) cap = false; return; } out.push(x); }); return out.join(' ').replace(/\s+/g, ' ').trim(); };
       const between = (a, b) => { const ra = new RegExp(a, 'i').exec(chunk); if (!ra) return ''; const rest = chunk.slice(ra.index + ra[0].length); const rb = new RegExp(b, 'i').exec(rest); return clean(rb ? rest.slice(0, rb.index) : rest.slice(0, 1500)); };
-      const DT = '«?\\s*(\\d{1,2})\\s*»?\\s*([а-яё]+)\\s*(\\d{4})';
+      const DT = '[«"\']?\\s*(\\d{1,2})\\s*[»"\']?\\s*([а-яё]+)\\s*(\\d{4})';
       const dIso = mm => mm ? iso(mm[1] + ' ' + mm[2] + ' ' + mm[3]) : '';
-      const no = new RegExp('№\\s*([^\\s«"]+)\\s*' + DT, 'i').exec(chunk.slice(0, 300));
+      const no = new RegExp('№\\s*([^\\s«"\']+)\\s*' + DT, 'i').exec(chunk.slice(0, 300));
       // конец акта — страница с подписями (после «Приложения»), дальше начинается следующий документ
       const pi = chunk.search(/\n\s*Приложени[ея]\s*:?/i);
       if (pi >= 0) { const pe = chunk.indexOf('\n\n', pi); if (pe > 0) chunk = chunk.slice(0, pe); }
@@ -1146,39 +1283,150 @@
         W_('Представитель лица, осуществляющего строительство, реконструкцию, капитальный ремонт') + '(?!\\s*,)',
         W_('Представитель лица, осуществляющего строительство, реконструкцию, капитальный ремонт, по вопросам строительного контроля'),
         W_('Представитель лица, осуществляющего подготовку проектной документации') + '[\\s\\S]*?' + W_('Российской Федерации)'),
-        W_('Представитель лица, выполнившего работы') + '[\\s\\S]*?' + W_('иными лицами)')
+        W_('Представитель лица,') + '\\s+вып\\S*\\s+работы[\\s\\S]*?' + W_('иными лицами)')
       ];
+      // организация: от «ООО "» до закрывающей кавычки перед запятой / концом строки / ОГРН (внутри бывают вложенные кавычки: «НПП"ТурбоМашПром»)
+      const ORG_RE = /(ООО|АО|ПАО|ЗАО|ИП|ОАО)\s*[«"][^,]*?[»"](?=\s*(?:,|$|ОГРН))/;
       const reps = roleRe.map(re => {
         const r = new RegExp(re, 'i').exec(pre); if (!r) return null;
-        const line = (pre.slice(r.index + r[0].length).split('\n').map(x => x.trim()).filter(Boolean)[0]) || '';
+        const after = pre.slice(r.index + r[0].length).split('\n').map(x => x.trim()).filter(Boolean);
+        const line = after[0] || '';
         if (/^\(|^Представитель/.test(line)) return null;
         const pm = /^(.*?)\s*([А-ЯЁ][а-яё\-]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]?\.?)\s*,?\s*(.*)$/.exec(line);
         if (!pm) return null;
-        const rest = pm[3].replace(/,\s*$/, '');
-        const om = /(ООО|АО|ПАО|ЗАО|ИП|ОАО)\s*[«"][\s\S]*$/.exec(rest);
-        return { position: str(pm[1]), short: str(pm[2]).replace(/\.\s+/g, '.'), authDoc: str(om ? rest.slice(0, om.index) : rest).replace(/[,\s]+$/, ''), org: om ? str(om[0]).replace(/[,\s]+$/, '') : '' };
+        let rest = pm[3].replace(/,\s*$/, '');
+        // приказ / доверенность бывает строкой ниже, под подписью «(должность…)»
+        if (!/приказ|доверенност|распоряжени|на основании|устав/i.test(rest)) {
+          let cap = false;
+          for (const x of after.slice(1, 12)) {
+            if (/^Представитель|^произвели/i.test(x)) break;
+            // приказ часто стоит прямо внутри разорванной подписи «(должность …,» ⏎ «приказ № …» ⏎ «реквизиты …)»
+            if (/^(приказ|доверенность|распоряжение|на основании)/i.test(x)) { rest = (rest + ', ' + x).replace(/^,\s*/, ''); break; }
+            if (!cap && /^\(/.test(x)) { cap = !/\)\s*$/.test(x); continue; }
+            if (cap) { if (/\)\s*$/.test(x)) cap = false; continue; }
+          }
+        }
+        // ID в НРС: «№ С-01-122978»
+        const nrsM = /№\s*([СC]-\d{2}-\d{6})/.exec(line + ' ' + rest);
+        if (nrsM) rest = rest.replace(nrsM[0], '');
+        const om = ORG_RE.exec(rest) || ORG_RE.exec(pm[1]);
+        const position = str(pm[1].replace(ORG_RE, '')).replace(/[,\s]+$/, '');
+        const authDoc = str(rest.replace(ORG_RE, '').replace(/,?\s*ОГРН[\s\S]*$/i, '')).replace(/^[,\s]+|[,\s]+$/g, '');
+        return { position, short: str(pm[2]).replace(/\.\s+/g, '.'), authDoc, org: om ? str(om[0]) : '', nrs: nrsM ? nrsM[1].replace(/^C/, 'С') : '' };
       });
-      const p2 = between(W_('2. Работы выполнены по проектной документации'), '\\n\\s*3\\s*\\.');
-      const p6 = between(W_('6. Работы выполнены в соответствии с'), '\\n\\s*7\\s*\\.');
+      // пункты ищем по ключевым фразам (у АОСР, АООК, разбивки осей и ГРО разная нумерация); конец пункта — следующий «N.», «б)», доп. сведения…
+      const NEXT = '\\n\\s*(?:\\d{1,2}\\s*\\.\\s*[А-ЯЁ]|[а-г]\\s*\\)\\s|' + W_('Дополнительные сведения') + '|' + W_('Акт составлен') + '|' + W_('Приложени') + ')';
+      const pt = (phrase, end) => between('(?:\\d{1,2}\\s*\\.\\s*)?' + phrase, end || NEXT);
+      const p2 = pt('(?:Работы|Конструкции|выполнена)(?:\\s+выполнены)?\\s+по\\s+проектн\\S*\\s+документ\\S*');
+      const p6 = pt('(?:Работы|Предъявленные\\s+конструкции)\\s+выполнены\\s+в\\s+\\S+\\s+[сcC](?![а-яa-z])');
       const codeIn = s => { const c = (str(s).match(/[0-9A-Za-zА-ЯЁ][0-9A-Za-zА-ЯЁ.\/]*(?:-[0-9A-Za-zА-ЯЁ.\/]+)+-[А-ЯЁ]{2,5}\s?\d{0,2}(?![А-Яа-яЁё\/\-])/g) || []); return c.map(codeNorm); };
       const sh = /(?:листы?|л\.)\s*([0-9А-ЯA-Z][0-9А-ЯA-Z,\s–\-]*)/i.exec(p2);
+      // п. 4 АОСР целиком; у АООК — «а) исполнительные геодезические схемы», «б) результаты экспертиз…»
+      const docsAll = pt('Предъяв\\S*\\s+документы[^\\n]*', '\\n\\s*\\d{1,2}\\s*\\.\\s*[А-ЯЁ]');
+      const ab = /^\s*а\)\s*([\s\S]*?)(?:\s*б\)\s*([\s\S]*))?$/i.exec(docsAll);
+      const name = type === 'Разбивка осей' ? pt('(?:' + W_('произведена разбивка осей') + '|' + W_('Произведена разбивка') + ')')
+        : type === 'ГРО' ? pt(W_('К освидетельствованию') + '\\s+предъявлен[а-я]*[^\\n:]*:?')
+        : pt('[КK]\\s+освид\\S*\\s+предъяв\\S*\\s+следующ\\S*\\s+(?:работы|ответственные\\s+конструкции)[^\\n:]*:?');
       return {
         type, no: no ? no[1] : '', date: dIso(no && [0, no[2], no[3], no[4]]),
-        name: type === 'Разбивка осей' ? between(W_('произведена разбивка осей') + '|' + W_('1. Произведена разбивка'), '\\n\\s*2\\s*\\.') : between(W_('1. К освидетельствованию предъявлены следующие работы') + ':?', '\\n\\s*2\\s*\\.'),
+        name,
         p2, codes: codeIn(p2), codes6: codeIn(p6), sheets: sh ? str(sh[1]).replace(/[,\s]+$/, '') : '',
-        mats: between('3\\s*\\.\\s*' + W_('При выполнении работ применены'), '\\n\\s*4\\s*\\.'),
-        docs: between('4\\s*\\.\\s*' + W_('Предъявлены документы') + '[^\\n]*', '\\n\\s*5\\s*\\.'),
+        mats: pt('При\\s+вы\\S+\\s+работ\\s+примен\\S*'),
+        docs: type === 'АООК' && ab ? str(ab[1]).replace(/^исполнительные\s+геодезические\s+схемы(?:\s+положения\s+конструкций)?\s*:?\s*/i, '') : docsAll.replace(/^(?:к\s+ним\s+)?требованиям\s*:?\s*/i, ''),
+        expertise: type === 'АООК' && ab ? str(ab[2]).replace(/^результаты\s+экспертиз[\s\S]*?испытаний(?:\s+и\s+опробований)?(?:\s+выполненных\s+работ)?\s*:?\s*/i, '') : '',
+        hiddenActs: type === 'АООК' ? pt(W_('Освидетельствованы скрытые работы') + '[^\\n:]*:?') : '',
+        tests: type === 'АООК' ? pt(W_('Проведены необходимые испытания и опробования') + ':?') : '',
+        loadCond: type === 'АООК' ? pt('(?:' + W_('разрешается полное нагружение') + '|' + W_('полное нагружение') + ')[^\\n:]*:?') : '',
         start: dIso(new RegExp(W_('начала работ') + '\\s*' + DT, 'i').exec(chunk)),
         end: dIso(new RegExp(W_('окончания работ') + '\\s*' + DT, 'i').exec(chunk)),
         norms: p6,
-        next: between('7\\s*\\.\\s*' + W_('Разрешается производство последующих работ') + '[^\\n]*', W_('Дополнительные сведения')),
+        next: pt('(?:[а-г]\\s*\\)\\s*)?' + W_('разрешается производство последующих работ') + '[^\\n]*'),
         extra: between(W_('Дополнительные сведения'), W_('Акт составлен')),
-        copies: (/Акт\s+составлен\s+в\s*(\d+)\s*экземпляр/i.exec(chunk) || [])[1] || '',
+        copies: (/Акт\s+составлен\s+в\s*(\d+)[\s—–\-]*\S*земпляр/i.exec(chunk) || [])[1] || '',
         attach: between('\\n\\s*' + W_('Приложения') + '\\s*:?', '\\n\\s*Представитель'),
         executor: str((/произвели\s+осмотр\s+работ,\s*выполненных\s+([^\n]+)/i.exec(chunk) || [])[1]).replace(/[,\s]+$/, ''),
         reps
       };
     }).filter(a => a.name || a.no);
+  }
+
+  // наименование из PDF, набранного по словам: «Бетонная смесь В 15 П 4» → «В15П4», «А 500 С» → «А500С», «40 х 100 х 6000» → «40х100х6000»
+  function tidyMark(s) {
+    let t = str(s);
+    t = t.replace(/(^|[\s,(])([ВПFWА])\s+(\d+(?:[.,]\d+)?)/g, '$1$2$3');
+    for (let k = 0; k < 3; k++) t = t.replace(/(В\d+(?:[.,]\d+)?)\s+(П\d|F\d|W\d)/g, '$1$2').replace(/([ПFW]\d+)\s+([FW]\d)/g, '$1$2');
+    t = t.replace(/([АA]\d{3})\s+([СC])(?![А-Яа-яA-Za-z])/g, '$1$2').replace(/Ø\s*(\d)\s+(\d)(?=\s*мм)/g, 'Ø$1$2').replace(/Ø\s+(\d)/g, 'Ø$1');
+    for (let k = 0; k < 3; k++) t = t.replace(/(\d)\s+[хx×]\s+(\d)/g, '$1х$2');
+    t = t.replace(/"\s*([^"]*?)\s*"/g, '"$1"');
+    return t;
+  }
+  // реестр исполнительной документации (начало комплекта): «№ п/п | Наименование | № документа | Число листов | № листа».
+  // Строка реестра — по номеру п/п; соседние строки ближе 9 pt — её продолжение. Заголовки групп: «Акты…», «Исполнительные схемы», «Сертификаты»
+  function registryParse(layout) {
+    const out = { acts: [], schemes: [], mats: [] };
+    let inReg = false, group = '', colNo = null, colDoc = null;
+    // вид документа в конце наименования (с опечатками, как в реальных реестрах: «Сертифиакт», «Сертификта», «соответсвии»)
+    const DOC_RE = /(Паспорт качества|Паспорт|Сертиф[а-я]{3,6}\s+(?:соответствия|качества)|Сертификат|Деклараци[яи]\s+о\s+соответ[а-яё]*(?:\s*\([^)]*\))?|Отказное письмо|Документ о качестве[а-яё ]*|Протокол испытаний|Свидетельство[а-яё ]*|Экспер[а-я]*\s+заключение)\s*$/i;
+    const fixType = t => str(t).replace(/^Сертиф[а-я]{3,6}\s+/i, 'Сертификат ').replace(/соответсвии/i, 'соответствии').replace(/государсвенной/i, 'государственной').replace(/^Эксперн/i, 'Экспертн');
+    // номер сертификата из PDF, набранного по словам: «РОСС RU.32001.04 ИБФ 1. ОСП 28.40856» → «РОСС RU.32001.04ИБФ1.ОСП28.40856»
+    const fixNo = n => /\./.test(n) ? str(n).replace(/\s*([.\-])\s*/g, '$1').replace(/(\d)\s+([А-ЯA-Z])/g, '$1$2').replace(/([А-ЯA-Z]{2,})\s+(\d)/g, (m, a, b) => /^(РОСС|RU)$/.test(a) ? m : a + b) : str(n);
+    (layout || []).forEach(page => {
+      const lines = page.slice().sort((a, b) => b.y - a.y).map(l => ({ y: l.y, items: (l.items || []).map(i => Object.assign({}, i, { s: str(i.s) })).filter(i => i.s) }));
+      const top = lines.slice(0, 12).map(l => l.items.map(i => i.s).join(' ')).join(' ');
+      if (/реестр/i.test(top) && /исполнительн|документац/i.test(top)) inReg = true;
+      if (!inReg) return;
+      // шапка таблицы (слова бывают отдельными кусками: «№п», «/», «п»)
+      const lineTxt = l => l.items.map(i => i.s).join(' ');
+      const hdr = lines.find(l => /№\s*п\s*\/\s*п/i.test(lineTxt(l)));
+      if (hdr) colNo = hdr.items[0].x;
+      const docHdr = lines.find(l => /№\s*чертеж|№\s*документ/i.test(lineTxt(l)));
+      if (docHdr) { const k = docHdr.items.findIndex(i => /чертеж|№\s*документ/i.test(i.s)); const it = k > 0 && docHdr.items[k - 1].s === '№' ? docHdr.items[k - 1] : docHdr.items[k]; colDoc = it.x - 15; }
+      if (colNo === null) return;
+      // строки с номером п/п — якоря записей
+      const anchors = lines.filter(l => l.items.some(i => i.x < colNo + 25 && /^\d{1,3}$/.test(i.s)));
+      if (!anchors.length && !hdr) { inReg = false; return; } // реестр кончился
+      const used = new Set();
+      lines.forEach(l => {
+        const isA = anchors.includes(l);
+        if (isA) return;
+        const near = anchors.map(a => [a, Math.abs(a.y - l.y)]).sort((x, y) => x[1] - y[1])[0];
+        const txt = l.items.map(i => i.s).join(' ');
+        // наименование в три строки: верхняя строка дальше 9 pt — берём, если она над записью, это не заголовок группы
+        // и к соседней записи сверху она не ближе
+        const above = anchors.filter(a => a.y < l.y).sort((x, y) => y.y - x.y)[0];
+        const upper = anchors.filter(a => a.y > l.y).sort((x, y) => x.y - y.y)[0];
+        if (near && near[1] <= 9) { (near[0]._more = near[0]._more || []).push(l); used.add(l); }
+        else if (above && l.y - above.y <= 16 && (!upper || upper.y - l.y > 9) && !/^(Акты|Исполнительн|Сертификат|Паспорт|Документы? о качестве|Протокол|Журнал)/i.test(txt) && l.items[0] && l.items[0].x >= colNo + 15 && (!colDoc || l.items[0].x < colDoc)) { (above._more = above._more || []).push(l); used.add(l); }
+      });
+      lines.forEach(l => {
+        if (anchors.includes(l)) {
+          const all = [l].concat(l._more || []).sort((a, b) => b.y - a.y).flatMap(x => x.items);
+          const no = all.find(i => i.x < colNo + 25 && /^\d{1,3}$/.test(i.s));
+          const cDoc = colDoc || 310;
+          const tidy = s => s.replace(/\s+/g, ' ').replace(/\s+([.,:;)])/g, '$1').replace(/([(№])\s+/g, '$1').replace(/\s*\/\s*/g, '/').replace(/\s*_\s*/g, '_').trim();
+          const nameTxt = tidy(all.filter(i => i !== no && i.x >= colNo + 15 && i.x < cDoc).map(i => i.s).join(' ')).replace(/[,\s]+$/, '');
+          const nums = all.filter(i => i.x >= cDoc + 150 && /^\d+$/.test(i.s));
+          const docTxt = tidy(all.filter(i => i.x >= cDoc && !nums.includes(i)).map(i => i.s).join(' '));
+          if (/схем/i.test(group) || /^Исполнительная схема/i.test(nameTxt)) out.schemes.push({ no: (/№\s*([^\s]+)/.exec(docTxt) || [])[1] || '', name: nameTxt });
+          else if (/акт/i.test(group) || /^Акт\s/i.test(nameTxt)) out.acts.push({ no: (/№\s*([^\s]+)/.exec(docTxt) || [])[1] || '', name: nameTxt });
+          else {
+            // материал: «Наименование + вид документа» | «№ … от … / с … по …»
+            let name = nameTxt, docType = '';
+            const dm = DOC_RE.exec(nameTxt) || /(Документ о качестве[а-яё ]*)/i.exec(nameTxt);
+            if (dm) { docType = fixType(dm[1]); name = str(nameTxt.replace(dm[0], '')).replace(/[,\s]+$/, ''); }
+            name = tidyMark(name);
+            const dno = /№\s*(.+?)(?=\s+от\s|\s+[сc]\s+\d|$)/i.exec(docTxt);
+            const dfrom = /(?:от|[сc])\s+(\d{2}\.\d{2}\.\d{4})/i.exec(docTxt), dto = /по\s+(\d{2}\.\d{2}\.\d{4})/i.exec(docTxt);
+            const docNo = dno ? fixNo(dno[1]) : '';
+            if (name && !out.mats.some(x => norm(x.name) === norm(name) && x.docNo === docNo)) out.mats.push({ name, docType: /^документ о качестве/i.test(docType) ? 'Документ о качестве' : docType, docNo, docDate: dfrom ? iso(dfrom[1]) : '', until: dto ? iso(dto[1]) : '' });
+          }
+        } else if (!used.has(l) && l !== hdr && l !== docHdr) {
+          const t = l.items.map(i => i.s).join(' ');
+          if (/^Акты|^Исполнительн|^Сертификат|^Паспорт|^Документы? о качестве|^Протокол|^Журнал/i.test(t)) group = t;
+        }
+      });
+    });
+    return out;
   }
 
   // ---------- офлайн: поиск по шаблонам в тексте ----------
@@ -1191,7 +1439,37 @@
     // чужая ИД (комплект актов) и РД / ПД — свои разборы
     if (looksIdPack(t)) {
       r.doc_kind = 'idpack'; r.idActs = idParse(text);
+      // участники из шапок актов: «ЗАО "Мегаполис", ОГРН …, ИНН …» — роль по заголовку перед ними
+      const tf = ocrFixAct(text); const seenOrg = {};
+      // название и «ОГРН …, ИНН …» бывают на разных строках (между ними — подпись под строкой); вложенные кавычки: «НПП"ТурбоМашПром»
+      const orgRe2 = /(ООО|ЗАО|ОАО|ПАО|АО|ИП)\s*["«]([^"»\n]{2,60}?(?:"[^"»\n]{1,40})?)["»]([\s\S]{0,450}?)ОГРН\s*(\d{12,15})\s*,?\s*ИНН\s*(\d{10,12})/g;
+      let om2;
+      while ((om2 = orgRe2.exec(tf))) {
+        if (/(?:ООО|ЗАО|ОАО|ПАО|АО|ИП)\s*["«]/.test(om2[3])) { orgRe2.lastIndex = om2.index + 3; continue; } // ОГРН другой организации
+        const at = om2.index;
+        om2 = [om2[0], om2[1], om2[2], om2[4], om2[5]];
+        const name = om2[1] + ' «' + str(om2[2]).replace(/["«»]/g, ' ').replace(/\s+/g, ' ').trim() + '»';
+        if (seenOrg[om2[4]]) continue; seenOrg[om2[4]] = 1;
+        const back = tf.slice(Math.max(0, at - 400), at);
+        const lastOf = re => { let m, i = -1; const g = new RegExp(re.source, 'gi'); while ((m = g.exec(back))) i = m.index; return i; };
+        const roles = [['customer', lastOf(/Застройщик/)], ['contractor', lastOf(/осуществляющ\S*\s+строительство/)], ['designer', lastOf(/подготовку\s+проектной/)], ['other', lastOf(/выполнившего\s+работы/)]].sort((a, b) => b[1] - a[1]);
+        r.organizations.push({ role: roles[0][1] >= 0 ? roles[0][0] : 'other', type: om2[1] === 'ИП' ? 'ИП' : 'ЮЛ', name, ogrn: om2[3], inn: om2[4], address: '', phone: '', okpo: '', sro_name: '', sro_ogrn: '', sro_inn: '' });
+      }
       r.summary = 'Исполнительная документация: актов ' + r.idActs.length;
+      // реестр в начале комплекта: материалы с документами о качестве → «Материалы»; акты и схемы — сверка
+      const reg = layout ? registryParse(layout) : { acts: [], schemes: [], mats: [] };
+      r.registry = reg;
+      reg.mats.forEach(m => r.materials.push({ name: m.name, mark: '', gost: '', maker: '', doc_type: m.docType, doc_no: m.docNo, doc_date: m.docDate, doc_until: m.until, supplier: '', delivery_doc: '', delivery_date: '', qty: '', unit: '' }));
+      if (reg.acts.length || reg.mats.length) {
+        const key = n => str(n).replace(/^№/, '');
+        const got = r.idActs.map(a => key(a.no));
+        const missing = reg.acts.filter(x => !got.includes(key(x.no))).map(x => '№ ' + key(x.no));
+        const extra = r.idActs.filter(a => !reg.acts.some(x => key(x.no) === key(a.no))).map(a => '№ ' + a.no);
+        r.summary += ' · по реестру: актов ' + reg.acts.length + ', схем ' + reg.schemes.length + ', документов о качестве ' + reg.mats.length +
+          (missing.length ? ' · в реестре есть, в файле не найдены: ' + missing.join(', ') : '') + (extra.length ? ' · в файле есть, в реестре нет: ' + extra.join(', ') : '');
+        // исполнительные схемы — в п. 4 акта с тем же номером, если в акте их нет
+        r.idActs.forEach(a => { const sc = reg.schemes.find(x => key(x.no) === key(a.no)); if (sc && !/схем/i.test(a.docs)) a.docs = str((a.docs ? a.docs + '; ' : '') + sc.name + ' № ' + key(sc.no)); });
+      }
       return r;
     }
     if (layout && looksRd(t, layout)) {
@@ -1354,7 +1632,17 @@
       r.summary = deliveryDoc ? deliveryDoc.charAt(0).toUpperCase() + deliveryDoc.slice(1) : (r.doc_kind === 'invoice' ? 'Счёт' : 'УПД / накладная');
       r.organizations.forEach(o => { o.role = 'supplier'; }); // стороны счёта — поставщик и мы сами
       const lines = layout ? (layout.find(ls => ls.some(l => /^(Поставщик|Продавец)/i.test(l.text))) || layout[0]) : t.split('\n').map(x => ({ text: x }));
-      const sup = supplierFromLines(lines);
+      let sup = supplierFromLines(lines);
+      // поставщика в документе нет (заказ окон и т.п.): по имени файла или по прошлым заказам с тем же префиксом номера («Д635» ← «Д512»)
+      if (!sup && A && A.project) {
+        const PP = A.project;
+        const known = Array.from(new Set(PP.materials.map(m => str(m.supplier)).filter(Boolean).concat(PP.orgs.filter(o => o.role === C.ORG_ROLE.supplier || /поставщик/i.test(o.role || '')).map(o => o.name))));
+        const fnN = norm(fname || '');
+        let hit = known.find(n => { const k = norm(orgKeyFromName(n)); return k.length > 2 && fnN.includes(k); });
+        const pref = (/^([A-Za-zА-Яа-яЁё]{1,4})-?\d/.exec(docNo || '') || [])[1];
+        if (!hit && pref) { const m = PP.materials.find(x => x.supplier && new RegExp('(заказ|сч[её]т)\\s*№\\s*' + pref + '-?\\d', 'i').test(x.delivery || '')); if (m) hit = m.supplier; }
+        if (hit) sup = { name: hit };
+      }
       if (layout) {
         // фото / скан: свой разбор по столбцу сумм; если он ничего не нашёл — общий, как для PDF
         let rows = layout.some(ls => ls.ocr) ? layout.flatMap(ocrTable) : [];
@@ -1688,6 +1976,12 @@
     return res;
   }
 
+  // «Устройство котлована в осях 1-4/А-В» → { base: «Устройство котлована», axes: «в осях 1-4/А-В» }
+  function splitAxes(name) {
+    const t = str(name);
+    const m = /\s+((?:в\s+осях|в\s*\/\s*о|по\s+осям|в\s+пределах\s+осей)\s+.+)$/i.exec(t);
+    return m ? { base: t.slice(0, m.index).replace(/[,\s]+$/, ''), axes: m[1].replace(/^в\s*\/\s*о/i, 'в осях') } : { base: t, axes: '' };
+  }
   // акт из чужой ИД → акт проекта: раздел по шифру, подписанты, материалы и исполнитель — по справочникам проекта;
   // что не нашлось — в a.imported (список «что исправить»)
   function idActToProject(P, a, d, source) {
@@ -1701,7 +1995,11 @@
     const mats = [], matsLeft = [];
     if (a.mats && !/реестр/i.test(a.mats)) a.mats.split(/;\s*|\n/).map(str).filter(x => x.length > 2).forEach(piece => {
       let best = null, bk = 0;
-      P.materials.forEach(m => { const k = Math.max(nameSim(piece, C.matName(m)), nameSim(piece.split(/[,(]/)[0], m.name || '')); if (k > bk) { bk = k; best = m; } });
+      // сначала по номеру документа о качестве в тексте акта («(Паспорт качества №11/09/2026 …)»), потом по наименованию
+      const cp = s => str(s).toUpperCase().replace(/[\s.\-]/g, '');
+      const byNo = P.materials.find(m => [m.doc1No, m.doc2No].some(n => cp(n).length >= 4 && cp(piece).includes(cp(n))));
+      if (byNo) { best = byNo; bk = 1; }
+      else P.materials.forEach(m => { const k = Math.max(nameSim(piece, C.matName(m)), nameSim(piece.split(/[,(]/)[0], m.name || '')); if (k > bk) { bk = k; best = m; } });
       if (best && bk >= 0.55) { if (!mats.includes(best.id)) mats.push(best.id); } else matsLeft.push(piece.slice(0, 120));
     });
     const reps = {}, repsLeft = [];
@@ -1717,16 +2015,22 @@
     });
     const builder = C.builderOrg(P);
     const exOrg = a.executor && P.orgs.find(o => nameSim(o.name, a.executor) > 0.8 || cmpName(o.name) === cmpName(a.executor) || (o.key.length > 2 && norm(a.executor).includes(norm(o.key))));
-    // вид работ из справочника — если наименование почти совпадает
+    // вид работ из справочника — если наименование (без осей) почти совпадает; тогда оси — в поле «Оси»
+    const nm = splitAxes(d.manualName || a.name);
     let work = null, wk = 0;
-    P.works.forEach(w => { if (w.actType && w.actType !== a.type) return; const k = nameSim(d.manualName || a.name, w.name); if (k > wk) { wk = k; work = w; } });
+    P.works.forEach(w => { if (w.actType && w.actType !== a.type) return; const k = nameSim(nm.base, w.name); if (k > wk) { wk = k; work = w; } });
+    const useWork = work && wk >= 0.85;
     return Object.assign({
-      id: C.uid(), type: a.type, section, workId: work && wk >= 0.8 ? work.id : '',
-      manualName: str(d.manualName || a.name), start: d.start || a.start, end: d.end || a.end, actDate: a.date && a.date !== (d.end || a.end) ? a.date : '',
+      id: C.uid(), type: a.type, section, workId: useWork ? work.id : '',
+      manualName: useWork ? '' : str(d.manualName || a.name), axes: useWork ? nm.axes : '', start: d.start || a.start, end: d.end || a.end, actDate: a.date && a.date !== (d.end || a.end) ? a.date : '',
       sheets: a.sheets ? (/^л/i.test(a.sheets) ? a.sheets : 'листы ' + a.sheets) : '', materials: mats, matQty: {},
-      docs: a.docs, manualNorms: a.norms, manualNext: a.next, extra: a.extra, copies: a.copies, manualAttach: /согласно\s+п/i.test(a.attach) ? '' : a.attach,
+      docs: a.docs, manualNorms: a.norms, manualNext: a.next, extra: a.extra,
+      hiddenActs: a.hiddenActs || '', expertise: a.expertise || '', tests: a.tests || '', loadCond: a.loadCond || '', copies: a.copies, manualAttach: /согласно\s+п/i.test(a.attach) ? '' : a.attach,
       executor: exOrg && (!builder || exOrg.key !== builder.key) ? exOrg.key : '',
-      note: 'Из чужой ИД: № ' + (a.no || '—') + (a.date ? ' от ' + C.fmtDate(a.date) : ''),
+      // примечание печатается в реестре ИД — туда служебное «из чужой ИД» не пишем (исходный № — в a.imported, виден в журнале)
+      note: '',
+      // схемы того же номера из реестра этого же файла
+      schemeIds: (P.schemes || []).filter(x => x.srcFile === source && str(x.srcNo).replace(/^№/, '') === str(a.no).replace(/^№/, '')).map(x => x.id),
       imported: { file: source, no: a.no, date: a.date, code: (a.codes || [])[0] || '', matsText: a.mats, matsLeft, repsLeft }
     }, reps);
   }
@@ -1827,52 +2131,105 @@
       const orgFind = name => name && P.orgs.find(o => nameSim(o.name, name) > 0.75 || nameSim(o.key, name) > 0.75 || (norm(name).includes(norm(o.key)) && o.key.length > 2));
       res.rd.sections.forEach(g => {
         const ex = P.rdSections.find(r => r.code && C.compactCode(r.code) === C.compactCode(g.code)) || P.rdSections.find(r => r.section === g.section && (r.stage || 'Р') === (g.stage || 'Р'));
-        if (g.org && !orgFind(g.org)) out.push({
+        // то же предложение уже есть (другой том этой загрузки или выше в этом файле) — не повторяем
+        const orgOffered = name => queue.concat([{ proposals: out }]).some(q => (q.proposals || []).some(x => !x.done && x.kind === 'Организации' && x.data && nameSim(x.data.name || '', name) > 0.75));
+        if (g.org && !orgFind(g.org) && !orgOffered(g.org)) out.push({
           kind: 'Организации', title: 'Добавить проектировщика: ' + g.org, checked: false,
           data: { key: orgKeyFromName(g.org), role: C.ORG_ROLE.designer, type: 'ЮЛ', name: g.org },
           fields: [F('key', 'Ключ (краткое имя)'), F('role', 'Роль в проекте', 'orgRole'), F('name', 'Наименование')],
           valid: d => P.orgs.some(o => o.key === d.key) ? 'ключ уже занят' : '',
           apply: d => P.orgs.push(Object.assign({ id: C.uid() }, d))
         });
-        const old = ex && ex.code && C.compactCode(ex.code) !== C.compactCode(g.code) ? ' — в проекте был шифр ' + ex.code : '';
+        // шифр со штампа текстовой части («…-КР1») не заменяет шифр, взятый из «Состава проекта» или титула («…-КР»)
+        const keepCode = ex && ex.codeFixed && !g.authoritative;
+        const code = keepCode ? ex.code : g.code;
+        const org0 = orgFind(g.org);
+        // раздел уже есть и ничего нового — не предлагаем (каждый том ПД содержит «Состав проекта» со всеми разделами)
+        if (ex && C.compactCode(ex.code) === C.compactCode(code) && (!g.sheets.length || (ex.sheetList || []).length >= g.sheets.length) &&
+          (!g.docName || ex.docName === g.docName || /^(Проектная|Рабочая) документация$/.test(g.docName)) && (!org0 || ex.designerKey === org0.key)) return;
+        const old = ex && ex.code && C.compactCode(ex.code) !== C.compactCode(code) ? ' — в проекте был шифр ' + ex.code : '';
         out.push({
-          kind: 'Документация', title: (ex ? 'Обновить ' : 'Добавить ') + (g.stage === 'П' ? 'раздел ПД ' : 'раздел РД ') + g.section + ': шифр ' + g.code +
-            (g.sheets.length ? ', листов ' + g.sheets.length + (g.fromList ? ' (по ведомости рабочих чертежей)' : ' (по штампам)') : '') + (g.org ? ', ' + g.org : '') + old, checked: true,
-          data: { section: g.section, code: g.code, docName: g.docName, stage: g.stage || 'Р' },
+          kind: 'Документация', title: (ex ? 'Обновить ' : 'Добавить ') + (g.stage === 'П' ? 'раздел ПД ' : 'раздел РД ') + g.section + ': шифр ' + code + (g.volume ? ', том ' + g.volume : '') +
+            (g.sheets.length ? ', листов ' + g.sheets.length + (g.fromList ? ' (по ведомости рабочих чертежей)' : ' (по штампам)') : '') + (g.org ? ', ' + g.org : '') + (g.gip ? ', ГИП ' + g.gip : '') + old, checked: true,
+          data: { section: g.section, code, docName: g.docName && !(ex && ex.docName && /^(Проектная|Рабочая) документация$/.test(g.docName)) ? g.docName : (ex && ex.docName) || g.docName, stage: g.stage || 'Р' },
           fields: [F('section', 'Раздел (КЖ, КМ, АР…)'), F('code', 'Шифр'), F('docName', 'Наименование'), F('stage', 'Стадия: П или Р')],
           list: g.sheets.map(x => 'Лист ' + x.no + ' — ' + x.name),
           apply: d => {
-            const t = ex || { id: C.uid() };
+            // раздел мог появиться из другого файла этой же загрузки — тогда обновляем его, а не заводим второй
+            const now = ex || P.rdSections.find(r => r.code && C.compactCode(r.code) === C.compactCode(d.code)) || P.rdSections.find(r => r.section === str(d.section) && (r.stage || 'Р') === (/п/i.test(d.stage) ? 'П' : 'Р'));
+            if (now && now !== ex && now.codeFixed && !g.authoritative) d = Object.assign({}, d, { code: now.code });
+            const t = now || { id: C.uid() };
+            const ex_ = now;
             const org = orgFind(g.org);
-            Object.assign(t, { section: str(d.section), code: str(d.code), docName: str(d.docName), stage: /п/i.test(d.stage) ? 'П' : 'Р', sheetList: g.sheets.map(x => ({ no: x.no, name: x.name })) }, org ? { designerKey: org.key } : {});
+            Object.assign(t, { section: str(d.section), code: str(d.code), docName: str(d.docName), stage: /п/i.test(d.stage) ? 'П' : 'Р' }, org ? { designerKey: org.key } : {},
+              // перечень листов — только если в этом файле он есть (том без графической части не затирает загруженный ранее)
+              g.sheets.length ? { sheetList: g.sheets.map(x => ({ no: x.no, name: x.name })) } : {},
+              g.volume ? { volume: g.volume } : {}, g.gip ? { gip: g.gip } : {}, g.authoritative ? { codeFixed: 1 } : {});
             delete t.sheetListText; // текстовый вид перечня пересоберётся из нового списка
-            if (!ex) P.rdSections.push(t);
+            if (!ex_) P.rdSections.push(t);
             if (t.section && !P.lists.sections.includes(t.section)) P.lists.sections.push(t.section);
           }
         });
       });
-      if (res.rd.expertise && res.rd.expertise !== st.expertise) out.push({
+      // ПОС: нормативная продолжительность строительства — для проверки сроков договора и дат актов
+      if (res.rd.pos && res.rd.pos.months && +st.posMonths !== +res.rd.pos.months) out.push({
+        kind: 'Объект и договор', title: 'Продолжительность строительства по ПОС: ' + res.rd.pos.months + ' мес.' + (res.rd.pos.prep ? ', в т. ч. подготовительный период ' + res.rd.pos.prep + ' мес.' : '') + (st.posMonths ? ' (сейчас: ' + st.posMonths + ')' : ''), checked: true,
+        data: { posMonths: String(res.rd.pos.months), posPrep: String(res.rd.pos.prep || '') },
+        fields: [F('posMonths', 'Продолжительность, мес.'), F('posPrep', 'В т. ч. подготовительный период, мес.')],
+        apply: d => { st.posMonths = C.num(d.posMonths) || ''; st.posPrep = C.num(d.posPrep) || ''; }
+      });
+      if (res.rd.expertise && res.rd.expertise !== st.expertise && !st.expertiseNone) out.push({
         kind: 'Объект и договор', title: 'Заключение экспертизы (для ОЖР): ' + res.rd.expertise, checked: !st.expertise, data: { expertise: res.rd.expertise },
         fields: [F('expertise', 'Заключение экспертизы' + (st.expertise ? ' (сейчас: ' + st.expertise + ')' : ''))], apply: d => { st.expertise = d.expertise; }
       });
     }
-    // чужая ИД: акты → «Журнал актов» (перенумеровываются по нашей схеме), новые подписанты — без галочки
+    // чужая ИД: акты → «Акты освидетельствования» (перенумеровываются по нашей схеме), новые подписанты — без галочки
     if (res.idActs && res.idActs.length) {
       const cmpName = x => str(x).toLowerCase().replace(/ё/g, 'е').replace(/[\s.]/g, '');
       const findPerson = rep => rep && P.people.find(x => cmpName(C.shortName(x.fullName)) === cmpName(rep.short) || cmpName(x.fullName) === cmpName(rep.short));
       const findOrg = name => name && P.orgs.find(o => nameSim(o.name, name) > 0.8 || cmpName(o.name) === cmpName(name) || (o.key.length > 2 && norm(name).includes(norm(o.key))));
       const seen = new Set();
+      // в чужой ИД только «Фамилия И.О.» — полное ФИО ищем у того же человека в других проектах
+      const others = Object.values((A.store && A.store.projects) || {}).filter(x => x && x.id !== P.id).flatMap(x => x.people || []);
       res.idActs.forEach(a => a.reps.forEach((rep, i) => {
         if (!rep || findPerson(rep) || seen.has(cmpName(rep.short) + i)) return;
         seen.add(cmpName(rep.short) + i);
+        // (исполнитель — тоже: по нашему формату он в акте только при субподряде, но человека завести можно)
         const org = findOrg(rep.org);
+        const twin = others.find(x => cmpName(C.shortName(x.fullName)) === cmpName(rep.short) && x.fullName.split(/\s+/).length >= 2);
         out.push({
-          kind: 'Представители', title: 'Добавить представителя из чужой ИД: ' + rep.short + (rep.position ? ', ' + rep.position.toLowerCase() : '') + ' — ' + C.REP_ROLES[i] + (rep.org ? ' (' + rep.org + ')' : ''), checked: false,
-          data: { role: C.REP_ROLES[i], orgKey: org ? org.key : '', fullName: rep.short, position: rep.position, authDoc: rep.authDoc, from: '' },
-          fields: [F('role', 'Роль', 'repRole'), F('orgKey', 'Организация (ключ)', 'orgKey'), F('fullName', 'ФИО (в акте только инициалы — допишите полностью)'), F('position', 'Должность'), F('authDoc', 'Документ о полномочиях'), F('from', 'Действует с', 'date')],
-          valid: d => d.role ? '' : 'выберите роль', apply: d => P.people.push(Object.assign({ id: C.uid() }, d))
+          kind: 'Представители', title: 'Добавить представителя из чужой ИД: ' + (twin ? twin.fullName : rep.short) + (rep.position ? ', ' + rep.position.toLowerCase() : '') + ' — ' + C.REP_ROLES[i] + (rep.org ? ' (' + rep.org + ')' : '') + (twin ? ' · полное ФИО — из другого проекта' : ''), checked: false,
+          data: { _org: rep.org || '', role: C.REP_ROLES[i], orgKey: org ? org.key : '', fullName: twin ? twin.fullName : rep.short, position: rep.position || (twin && twin.position) || '', authDoc: rep.authDoc || (twin && twin.authDoc) || '', nrs: rep.nrs || (twin && twin.nrs) || '', from: '' },
+          fields: [F('role', 'Роль', 'repRole'), F('orgKey', 'Организация (ключ)', 'orgKey'), F('fullName', twin ? 'ФИО' : 'ФИО (в акте только инициалы — допишите полностью)'), F('position', 'Должность'), F('authDoc', 'Документ о полномочиях'), F('nrs', 'ID в НРС'), F('from', 'Действует с', 'date')],
+          valid: d => d.role ? '' : 'выберите роль',
+          apply: d => { const x = Object.assign({ id: C.uid() }, d); if (!x.orgKey && x._org) { const o = findOrg(x._org); if (o) x.orgKey = o.key; } delete x._org; P.people.push(x); }
         });
       }));
+      // виды работ: наименования актов без осей, которых нет в «Справочнике работ» → заготовки (нормативы и последующие работы — из акта)
+      const newWorks = [];
+      res.idActs.forEach(a => {
+        const base = splitAxes(a.name).base;
+        if (!base || base.length < 5) return;
+        if (P.works.some(w => nameSim(base, w.name) >= 0.85) || newWorks.some(w => nameSim(base, w.name) >= 0.85)) return;
+        newWorks.push({ name: base, actType: a.type, norms: a.norms, next: splitAxes(a.next).base, codes: (a.codes6 || []).concat(a.codes || []) });
+      });
+      if (newWorks.length) out.push({
+        kind: 'Справочник работ', title: 'Завести виды работ из чужой ИД: ' + newWorks.length + ' — тогда в актах наименование, нормативы и последующие работы пойдут из справочника, а оси — отдельным полем', checked: false,
+        data: {}, fields: [], list: newWorks.map(w => w.actType + ': ' + w.name),
+        apply: () => newWorks.forEach(w => {
+          let section = '';
+          w.codes.some(c => { const r = P.rdSections.find(x => x.code && C.compactCode(x.code) === C.compactCode(c)); if (r) section = r.section; return !!r; });
+          if (!section && w.codes.length) section = codeSection(w.codes[0]);
+          P.works.push({ id: C.uid(), code: '', actType: w.actType, section, name: w.name, norms: w.norms, next: w.next, docs: '' });
+        })
+      });
+      // исполнительные схемы из реестра → справочник «Исполнительные схемы» (акты привяжутся к ним по номеру)
+      const regSch = ((res.registry && res.registry.schemes) || []).filter(x => x.name && !P.schemes.some(y => y.srcFile === source && y.srcNo === x.no));
+      if (regSch.length) out.push({
+        kind: 'Исполнительные схемы', title: 'Завести исполнительные схемы из реестра: ' + regSch.length + ' — в актах они будут отмечены', checked: true,
+        data: {}, fields: [], list: regSch.map(x => '№ ' + x.no + ' — ' + x.name),
+        apply: () => regSch.forEach(x => P.schemes.push({ id: C.uid(), no: x.no, name: str(x.name).replace(/^Исполнительная\s+схема\.?\s*/i, ''), date: '', note: '', srcFile: source, srcNo: x.no }))
+      });
       res.idActs.forEach(a => {
         const dup = P.acts.find(x => x.imported && x.imported.no === a.no && x.type === a.type && x.imported.date === a.date);
         out.push({
@@ -1970,6 +2327,21 @@
       });
     }
     out.forEach(p => { p.source = source; p.id = C.uid(); applyLearned(p); p.orig = Object.assign({}, p.data); });
+    // новые организации и представители из документа запоминаем в проекте — их можно принять потом
+    // прямо в окнах «Организации» / «Представители» (даже если здесь не отметили)
+    const cn = x => str(x).toLowerCase().replace(/ё/g, 'е').replace(/[«»"'\s.]/g, '');
+    P.candidates = P.candidates || [];
+    let added = 0;
+    out.filter(p => /^Добавить/.test(p.title) && (p.kind === 'Организации' || p.kind === 'Представители')).forEach(p => {
+      const kind = p.kind === 'Организации' ? 'org' : 'person';
+      const d = p.data || {};
+      const same = c => c.kind === kind && (kind === 'org' ? (d.inn && c.data.inn === d.inn) || cn(c.data.name) === cn(d.name) : cn(C.shortName(c.data.fullName)) === cn(C.shortName(d.fullName)) && c.data.role === d.role);
+      let c = P.candidates.find(same);
+      if (!c) { c = { id: C.uid(), kind, data: JSON.parse(JSON.stringify(d)), source }; P.candidates.push(c); added++; }
+      const ap = p.apply;
+      p.apply = dd => { ap(dd); P.candidates = P.candidates.filter(x => x.id !== c.id); };
+    });
+    if (added && A.touch) A.touch();
     return out;
   }
   // ---------- обучение на поправках пользователя ----------
@@ -2052,12 +2424,24 @@
           const sup = text && parseSupplement(text);
           if (sup) { res.doc_kind = 'supplement'; res.supplement = sup; res.contract = emptyResult().contract; res.summary = 'Доп. соглашение № ' + (sup.no || '—') + (sup.date ? ' от ' + C.fmtDate(sup.date) : ''); }
           item.via = 'ИИ';
+          // скан / фото акта освидетельствования: ИИ его как ИД не разбирает — распознаём текст на устройстве и разбираем по форме 344/пр
+          if (item.scan && /^(act|other)$/.test(res.doc_kind || 'other')) {
+            item.status = 'Проверяю, не акт ли освидетельствования…'; draw();
+            const images = e === 'pdf' ? await pdfImages(buf, 6) : [await loadImage(file)];
+            const o = await ocrImages(images, (p, stage) => { item.status = 'Скан: ' + (stage || 'распознаю') + '… ' + Math.round(p * 100) + '%'; draw(); });
+            if (looksIdPack(o.text)) { item.rawText = o.text; res = offlineParse(o.text, o.layout.some(ls => ls.length) ? o.layout : null, file.name); item.via = 'офлайн, распознан скан'; }
+          }
         } else {
           if (item.scan) {
             // скан или фото — распознаём текст на устройстве
             item.status = 'Распознаю скан…'; draw();
             const images = e === 'pdf' ? await pdfImages(buf, 3) : [await loadImage(file)];
-            const o = await ocrImages(images, (p, stage) => { item.status = 'Скан: ' + (stage || 'распознаю') + '… ' + Math.round(p * 100) + '%'; draw(); });
+            let o = await ocrImages(images, (p, stage) => { item.status = 'Скан: ' + (stage || 'распознаю') + '… ' + Math.round(p * 100) + '%'; draw(); });
+            // скан комплекта актов — распознаём больше страниц (акт занимает 2–3 листа)
+            if (e === 'pdf' && looksIdPack(o.text)) {
+              item.status = 'Скан актов: распознаю остальные страницы…'; draw();
+              o = await ocrImages(await pdfImages(buf, 40), (p, stage) => { item.status = 'Скан актов: ' + (stage || 'распознаю') + '… ' + Math.round(p * 100) + '%'; draw(); });
+            }
             text = o.text;
             // строки с координатами слов — для таблиц счетов, УПД и чеков на фото
             layout = o.layout.some(ls => ls.length) ? o.layout : null;
@@ -2076,8 +2460,8 @@
         autoFill(item);
         item.status = (res.summary || 'Документ') + ' · ' + item.via;
         if (!item.proposals.length) item.note = 'Новых данных не найдено (всё уже есть в проекте или документ не распознан).' + (item.rawText ? ' Можно перенести данные вручную: «Разметить по тексту».' : '');
-        else if (res.doc_kind === 'idpack') item.note = 'Акты разобраны по форме 344/пр. После применения они появятся в «Журнале актов» с отметкой «чужая ИД» и списком «что исправить». Нумерация — по нашей схеме, исходный номер сохранится.';
-        else if (res.doc_kind === 'rd') item.note = 'Разделы и листы взяты из штампов и ведомости рабочих чертежей. После применения — в «Справочник работ → Проектная и рабочая документация», в актах листы выбираются галочками.';
+        else if (res.doc_kind === 'idpack') item.note = 'Акты разобраны по форме 344/пр. После применения они появятся в «Актах освидетельствования» с отметкой «чужая ИД» и списком «что исправить». Нумерация — по нашей схеме, исходный номер сохранится.';
+        else if (res.doc_kind === 'rd') item.note = 'Разделы и листы взяты из штампов и ведомости рабочих чертежей. После применения — в «Проектная и рабочая документация», в актах листы выбираются галочками.';
         else if (item.via === 'офлайн') item.note = 'Разобрано по шаблонам — проверьте значения. Точнее и полнее распознаёт ИИ.';
       } else if (e === 'doc') {
         throw new Error('Старый формат .doc не поддерживается. Сохраните файл как .docx или PDF.');
@@ -2113,12 +2497,12 @@
   function view() {
     const { head, card, para, esc } = UI;
     const main = UI.main();
-    main.appendChild(head('Загрузка документов', 'Договоры, сертификаты, паспорта, счета, УПД, сметы и таблицы Excel. Найденные данные показываются на проверку и попадают в проект только после подтверждения.'));
+    main.appendChild(head('Загрузка документов', 'Найденное показывается на проверку и попадает в проект только после «Принять».'));
     // зона загрузки
     const drop = document.createElement('div'); drop.className = 'card drop';
-    drop.innerHTML = '<div class="drop-inner"><b>Перетащите файлы сюда или вставьте скриншот (Ctrl+V)</b><span class="muted small">PDF, Word (.docx), Excel (.xlsx, .xlsm, .xls, .csv), фото и сканы (.jpg, .png), скриншоты и скопированный текст</span>' +
+    drop.innerHTML = '<div class="drop-inner"><b>Перетащите файлы сюда</b><span class="muted small">договоры, ДС, сметы, РД / ПД, акты и комплекты ИД, сертификаты, счета, УПД — PDF, Word, Excel, фото и скриншоты</span>' +
       '<div class="drop-btns"><label class="btn btn-primary">Выбрать файлы<input type="file" multiple hidden accept=".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.csv,.ods,.txt,.jpg,.jpeg,.png,.webp,.gif,image/*"></label>' +
-      '<button type="button" class="btn" data-paste>Вставить из буфера</button></div></div>';
+      '<button type="button" class="btn" data-paste>Вставить из буфера (Ctrl+V)</button></div></div>';
     const inp = drop.querySelector('input');
     drop.querySelector('[data-paste]').addEventListener('click', pasteFromButton);
     inp.addEventListener('change', () => { Array.from(inp.files).forEach(processFile); inp.value = ''; });
@@ -2126,8 +2510,9 @@
     ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
     drop.addEventListener('drop', e => Array.from(e.dataTransfer.files || []).forEach(processFile));
     main.appendChild(drop);
-    // настройки ИИ
-    const ai = card('Распознавание через ИИ (Claude)', []);
+    // настройки ИИ — свёрнуто, в одну строку
+    const ai = document.createElement('details'); ai.className = 'opts card ai-opts';
+    ai.innerHTML = '<summary>Распознавание через ИИ (Claude): <b>' + (aiSettings.enabled && aiSettings.key ? 'включено' : 'выключено') + '</b> — настроить</summary>';
     ai.innerHTML += '<p class="muted small">Нужно для сканов и фото, а также для более точного разбора договоров, счетов и сертификатов. Документ отправляется в Anthropic (Claude API) и оплачивается по вашему API-ключу. Ключ хранится только на этом устройстве и не попадает в файл проекта. Получить ключ: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.</p>' +
       '<div class="grid"><label class="field wide"><span>API-ключ Anthropic</span><input type="password" autocomplete="off" placeholder="sk-ant-…" id="aiKey"></label>' +
       '<label class="check"><input type="checkbox" id="aiOn"> Использовать ИИ для PDF, Word и фото</label></div>';
@@ -2147,25 +2532,57 @@
     const { esc } = UI;
     root.innerHTML = '';
     if (!queue.length) { root.innerHTML = '<div class="empty">Загруженных документов пока нет.</div>'; return; }
-    const pending = queue.reduce((n, q) => n + q.proposals.filter(p => !p.done).length, 0);
-    if (pending) {
-      const bar = document.createElement('div'); bar.className = 'toolbar sticky-bar';
-      bar.innerHTML = '<span class="muted small">Предложений к проверке: ' + pending + '</span>';
-      bar.appendChild(UI.btn('Применить отмеченные', applyChecked, 'btn-primary'));
+    // по умолчанию раскрыт первый файл, где есть что принять (и файлы с ошибкой или таблицей Excel)
+    const firstPend = queue.find(q => q.proposals.some(p => !p.done));
+    queue.forEach(item => {
+      const pend = item.proposals.filter(p => !p.done), done = item.proposals.filter(p => p.done);
+      const busy = /…$/.test(item.status || '');
+      item.ui = item.ui || { groups: {} };
+      const open = item.ui.open !== undefined ? item.ui.open : (!busy && (item === firstPend || !!item.excel || !!item.error));
+      const c = document.createElement('div'); c.className = 'card imp-file' + (open ? ' open' : '');
+      const ext = (item.name.match(/\.(\w+)$/) || [])[1] || '';
+      const icon = /pdf/i.test(ext) ? '📕' : /docx?|rtf|odt/i.test(ext) ? '📄' : /xls|csv|ods/i.test(ext) ? '📊' : /png|jpe?g|webp|gif|bmp/i.test(ext) ? '🖼' : '📝';
+      // что найдено — «таблетками» по видам
+      const kinds = [];
+      item.proposals.forEach(p => { if (!kinds.includes(p.kind)) kinds.push(p.kind); });
+      const found = kinds.map(k => { const n = pend.filter(p => p.kind === k).length, d = done.filter(p => p.kind === k).length; return '<span class="' + (n ? 'n' : 'd') + '">' + esc(k) + (n + d > 1 ? ': ' + (n || d) : '') + (n ? '' : ' ✓') + '</span>'; }).join('');
+      const state = item.error ? '<span class="state err">ошибка</span>' : busy ? '<span class="state run">идёт <span class="spinner"></span></span>' : pend.length ? '<span class="state new">к принятию: ' + pend.length + '</span>' : done.length ? '<span class="state done">✓ принято</span>' : '';
+      c.innerHTML = '<div class="imp-row1" tabindex="0"><div class="fi">' + icon + '</div><div class="tx"><b title="' + esc(item.name) + '">' + esc(item.name) + '</b><span class="k">' + esc(item.status || '') + '</span>' + (found ? '<div class="found">' + found + '</div>' : '') + '</div>' + state + '<span class="ch">▾</span></div><div class="det"></div>';
+      const r1 = c.querySelector('.imp-row1');
+      const tg = () => { item.ui.open = !c.classList.contains('open'); c.classList.toggle('open'); };
+      r1.addEventListener('click', tg); r1.addEventListener('keydown', e => { if (e.key === 'Enter') tg(); });
+      const det = c.querySelector('.det');
+      det.insertAdjacentHTML('beforeend', (item.note ? '<p class="small ' + (item.error ? '' : 'muted') + '" style="' + (item.error ? 'color:var(--danger)' : '') + '">' + esc(item.note) + '</p>' : '') +
+        (item.autoNote ? '<p class="small auto-note">' + esc(item.autoNote) + '</p>' : ''));
+      root.appendChild(c);
+      fileDetails(item, det, pend, done, kinds);
+    });
+    // внизу — сколько отмечено и «Принять отмеченное»
+    const all = queue.flatMap(q => q.proposals.filter(p => !p.done));
+    const foot = document.createElement('div'); foot.className = 'imp-foot';
+    const cnt = document.createElement('span'); cnt.className = 'muted small';
+    const accept = UI.btn('', applyChecked, 'btn-primary');
+    const sp = document.createElement('span'); sp.style.flex = '1';
+    foot.append(cnt, sp,
       // после смены проекта или ручных правок — заново сопоставить уже распознанные документы с проектом
-      bar.appendChild(UI.btn('Обновить предложения', () => {
+      UI.btn('Обновить предложения', () => {
         queue.forEach(q => { if (q.res) { q.proposals = buildProposals(q.res, q.name).concat(q.proposals.filter(p => p.done)); autoFill(q); } });
         draw(); UI.toast('Предложения пересобраны под проект «' + A.projTitle(A.project) + '»');
-      }));
-      bar.appendChild(UI.btn('Очистить список', () => { queue.length = 0; draw(); }));
-      root.appendChild(bar);
-    } else root.appendChild(Object.assign(document.createElement('div'), { className: 'toolbar' })).appendChild(UI.btn('Очистить список', () => { queue.length = 0; draw(); }));
+      }),
+      UI.btn('Очистить список', () => { queue.length = 0; draw(); }), accept);
+    const upd = () => {
+      const n = all.filter(p => p.checked).length;
+      cnt.textContent = all.length ? 'Отмечено: ' + n + ' из ' + all.length : 'Всё принято';
+      accept.textContent = 'Принять отмеченное (' + n + ')'; accept.disabled = !n;
+    };
+    root.onchange = upd; upd();
+    root.appendChild(foot);
+  }
 
-    queue.forEach(item => {
-      const c = document.createElement('div'); c.className = 'card';
-      c.innerHTML = '<div class="imp-head"><b>' + esc(item.name) + '</b><span class="badge ' + (item.error ? 'danger' : item.status.endsWith('…') ? '' : 'ok') + '">' + esc(item.status) + '</span>' + (item.status.endsWith('…') ? '<span class="spinner"></span>' : '') + '</div>' +
-        (item.note ? '<p class="small ' + (item.error ? '' : 'muted') + '" style="' + (item.error ? 'color:var(--danger)' : '') + '">' + esc(item.note) + '</p>' : '') +
-        (item.autoNote ? '<p class="small auto-note">' + esc(item.autoNote) + '</p>' : '');
+  // подробности файла: служебные кнопки, разметка текста, Excel, предложения группами по видам
+  function fileDetails(item, c, pend, done, kinds) {
+    const { esc } = UI;
+    {
       // договор другого объекта — отдельным проектом, а не поверх текущего
       if (item.res && item.res.doc_kind === 'contract' && !item.projectCreated) {
         const c0 = item.res.contract || {}, cur = A.project.settings;
@@ -2193,9 +2610,28 @@
         c.appendChild(det);
       }
       if (item.excel) c.appendChild(excelPanel(item));
-      item.proposals.forEach(p => c.appendChild(proposalEl(p)));
-      root.appendChild(c);
-    });
+      // группы: галочка на всю группу, «показать» — подробности каждого предложения
+      kinds.forEach(k => {
+        const ps = pend.filter(p => p.kind === k);
+        if (!ps.length) return;
+        const gOpen = item.ui.groups[k] !== undefined ? item.ui.groups[k] : ps.length <= 2;
+        const g = document.createElement('div'); g.className = 'grp' + (gOpen ? ' open' : '');
+        const nOn = ps.filter(p => p.checked).length;
+        const preview = ps.slice(0, 2).map(p => p.titleOf ? p.titleOf(p.data) : p.title).join('; ') + (ps.length > 2 ? ' и ещё ' + (ps.length - 2) : '');
+        g.innerHTML = '<div class="gh"><input type="checkbox"' + (nOn === ps.length ? ' checked' : '') + ' title="Отметить всю группу"><span class="gt">' + esc(k) + '</span><span class="gn">' + ps.length + '</span><span class="gc">' + esc(preview) + '</span><span class="more">' + (gOpen ? 'скрыть' : 'показать') + '</span></div><div class="items"></div>';
+        const cb = g.querySelector('.gh input');
+        cb.indeterminate = nOn > 0 && nOn < ps.length;
+        cb.addEventListener('change', () => { ps.forEach(p => { p.checked = cb.checked; }); draw(); });
+        g.querySelector('.gh').addEventListener('click', e => {
+          if (e.target === cb) return;
+          item.ui.groups[k] = !g.classList.contains('open'); g.classList.toggle('open');
+          g.querySelector('.more').textContent = g.classList.contains('open') ? 'скрыть' : 'показать';
+        });
+        const box = g.querySelector('.items');
+        ps.forEach(p => box.appendChild(proposalEl(p)));
+        c.appendChild(g);
+      });
+      if (done.length) c.insertAdjacentHTML('beforeend', '<p class="small muted imp-done">Уже принято: ' + done.length + ' — ' + esc(done.slice(0, 4).map(p => p.title).join('; ') + (done.length > 4 ? ' и ещё ' + (done.length - 4) : '')) + '</p>');    }
   }
 
   function excelPanel(item) {
@@ -2384,6 +2820,8 @@
   }
   function autoFill(item) {
     if (!item.rawText || !item.rawText.trim()) return;
+    // комплект ИД и ПД / РД разобраны по своей форме — «добирать» поля из общего текста нельзя (наберётся чужое из других листов)
+    if (item.res && /^(idpack|rd|supplement)$/.test(item.res.doc_kind)) return;
     const kv = kvExtract(item.rawText);
     let live = item.proposals.filter(p => !p.done);
     // разбор не нашёл в документе вообще ничего — создаём предложение по виду документа и заполняем из текста
@@ -2638,18 +3076,21 @@
 
   function applyChecked() {
     let n = 0; const errs = [];
+    if (!queue.some(q => q.proposals.some(p => !p.done && p.checked))) { UI.toast('Ничего не отмечено'); return; }
     // снимок до изменений — можно откатить в «Проекты и файлы → История версий»
     if (window.IDBackup && queue.some(q => q.proposals.some(p => !p.done && p.checked))) IDBackup.snapshot('перед применением загруженных документов');
-    queue.forEach(q => q.proposals.forEach(p => {
+    const applied = [];
+    const run = () => queue.forEach(q => q.proposals.forEach(p => {
       if (p.done || !p.checked) return;
       const msg = p.valid && p.valid(p.data);
       if (msg) { errs.push(p.title + ': ' + msg); return; }
       learnFrom(p);
-      p.apply(p.data); p.done = true; n++;
+      p.apply(p.data); p.done = true; n++; applied.push(p);
     }));
-    if (n) A.touch();
-    UI.toast(n ? 'Применено: ' + n + (errs.length ? '. Не применено: ' + errs.length : '') : (errs[0] || 'Ничего не отмечено'));
-    if (errs.length) UI.toast(errs.join('; ').slice(0, 300));
+    const text = () => n ? 'Принято: ' + n + (errs.length ? '. Не принято: ' + errs.length + ' — ' + errs[0] : '') : (errs[0] || 'Ничего не отмечено');
+    // «Отменить» в уведомлении: проект — как до принятия, предложения снова к принятию
+    if (UI.undoable) UI.undoable(text, () => { run(); if (n) A.touch(); }, () => { applied.forEach(p => { p.done = false; }); });
+    else { run(); if (n) A.touch(); UI.toast(text()); }
     draw();
   }
 
@@ -2715,5 +3156,5 @@
   });
 
   // для проверки
-  window.IDImport = { rdParse, idParse, stampOf, looksIdPack, offlineParse, pdfText: b => pdfText(b), invoiceTable, ocrTable,mergeNumbers, pdfImages, ocrImages, cleanDocNo, findDocNumbers, fromFileName, guessMapping, excelToResult, buildProposals: (r, s) => buildProposals(r, s), iso, SCHEMA, generatorToProject: wb => generatorToProject(wb) };
+  window.IDImport = { volumesOf, titleOf, registryParse, rdParse, idParse, stampOf, looksIdPack, offlineParse, pdfText: b => pdfText(b), invoiceTable, ocrTable,mergeNumbers, pdfImages, ocrImages, cleanDocNo, findDocNumbers, fromFileName, guessMapping, excelToResult, buildProposals: (r, s) => buildProposals(r, s), iso, SCHEMA, generatorToProject: wb => generatorToProject(wb) };
 })();

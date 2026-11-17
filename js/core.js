@@ -167,7 +167,7 @@
     out.lists = Object.assign({}, base.lists, p.lists || {});
     FIXED_LISTS.forEach(k => { out.lists[k] = DEFAULT_LISTS[k].slice(); });
     ['sections', 'docTypes', 'units'].forEach(k => { if (!Array.isArray(out.lists[k]) || !out.lists[k].length) out.lists[k] = DEFAULT_LISTS[k].slice(); });
-    ['orgs', 'people', 'materials', 'works', 'acts', 'smeta', 'rdSections', 'ksHistory', 'supplements'].forEach(k => {
+    ['orgs', 'people', 'materials', 'works', 'acts', 'smeta', 'rdSections', 'ksHistory', 'supplements', 'schemes', 'candidates'].forEach(k => {
       if (!Array.isArray(out[k])) out[k] = [];
       out[k].forEach(r => { if (!r.id) r.id = uid(); });
     });
@@ -306,7 +306,10 @@
   }
 
   // ---------- раздел рабочей документации для акта ----------
-  function rdSection(p, section) { return section ? (p.rdSections || []).find(r => r.section === section) || null : null; }
+  // раздел для акта: рабочая документация важнее проектной (у АР может быть и ПД, и РД)
+  function rdSection(p, section) { if (!section) return null; const l = (p.rdSections || []).filter(r => r.section === section); return l.find(r => r.stage !== 'П') || l[0] || null; }
+  // какие разделы РД разрабатываются по разделу ПД
+  const PD_TO_RD = { КР: ['КЖ', 'КМ', 'КМД', 'КД', 'АС'], АР: ['АР', 'АС'], ПЗУ: ['ГП', 'АД'], ИОС1: ['ЭС', 'ЭОМ', 'ЭН'], ИОС2: ['ВК', 'НВК'], ИОС3: ['ВК', 'НВК'], ИОС4: ['ОВ', 'ТМ'], ИОС5: ['СС', 'СКС', 'АПС'], ИОС6: ['ГСН', 'ГСВ'] };
   // шифр и наименование РД: особый шифр вида работ → раздел РД → общий шифр объекта
   function rdFor(p, a, w) {
     const st = p.settings;
@@ -321,6 +324,8 @@
     return { code: s(code), docName, designer, projectDoc, source, section };
   }
 
+  // «Исполнительная схема № 3. Устройство подготовки… от 20.10.2026»
+  const schemeLabel = x => ('Исполнительная схема ' + (x.no ? '№ ' + s(x.no) + '. ' : '') + s(x.name).replace(/^Исполнительная\s+схема\.?\s*(№\s*\S+\.?\s*)?/i, '')).trim() + (x.date ? ' от ' + fmtDate(x.date) : '');
   // листы раздела РД / тома ПД: [{no, name}] (из ведомости рабочих чертежей или вручную)
   const rdSheets = (p, section) => { const r = rdSection(p, section); return (r && r.sheetList) || []; };
   // «листы 1–3, 5, В1»: подряд идущие номера — диапазоном
@@ -358,7 +363,8 @@
     else if (!r.code) out.push('у раздела «' + a.section + '» не указан шифр');
     // шифр из их акта не совпадает с нашим (старая редакция или другой раздел)
     const theirCode = s(a.imported.code);
-    if (theirCode && v.projectCode && compactCode(theirCode) !== compactCode(v.projectCode)) out.push('в исходном акте шифр «' + theirCode + '», в проекте — «' + v.projectCode + '»');
+    // (пока п. 2 не проверен — листы не выбраны; после выбора листов это уже не замечание)
+    if (theirCode && v.projectCode && !a.sheets && compactCode(theirCode) !== compactCode(v.projectCode)) out.push('в исходном акте шифр «' + theirCode + '», в проекте — «' + v.projectCode + '»');
     // в п. 6 (нормативы) и п. 4 остались ссылки на шифры, которых нет в нашей документации
     const known = (p.rdSections || []).map(x => compactCode(x.code)).concat([compactCode(v.projectCode)]);
     [['п. 6', a.manualNorms], ['п. 4', a.docs]].forEach(([pt, txt]) => {
@@ -369,12 +375,24 @@
     const list = rdSheets(p, a.section).map(x => s(x.no));
     if (list.length && a.sheets) { const bad = sheetsParse(a.sheets).filter(n => !list.includes(n)); if (bad.length) out.push('листов ' + bad.join(', ') + ' нет в ведомости раздела ' + a.section); }
     if (!a.sheets && list.length) out.push('не выбраны листы РД');
+    // даты: акт не раньше окончания работ; материалы — поставлены и с документами до начала работ;
+    // работы начаты не раньше подписания предыдущего акта того же раздела (скрытые работы закрываются по порядку)
+    const ad = v.date;
+    if (ad && a.end && ad < a.end) out.push('акт датирован ' + fmtDate(ad) + ' — раньше окончания работ ' + fmtDate(a.end));
+    (a.materials || []).map(id => p.materials.find(m => m.id === id)).filter(Boolean).forEach(m => {
+      if (m.deliveryDate && a.start && m.deliveryDate > a.start) out.push('материал «' + matName(m) + '» поставлен ' + fmtDate(m.deliveryDate) + ' — после начала работ ' + fmtDate(a.start));
+      if (m.doc1Date && ad && m.doc1Date > ad) out.push('документ о качестве на «' + matName(m) + '» выдан ' + fmtDate(m.doc1Date) + ' — позже даты акта');
+    });
+    const idx = p.acts.indexOf(p.acts.find(x => x.id === a.id) || a);
+    const prev = idx > 0 ? p.acts.slice(0, idx).reverse().find(x => x.type === a.type && s(x.section) === s(a.section) && (x.actDate || x.end)) : null;
+    if (prev && a.start && a.start < (prev.actDate || prev.end)) out.push('работы начаты ' + fmtDate(a.start) + ' — до подписания предыдущего акта № ' + actNumber(p, prev) + ' от ' + fmtDate(prev.actDate || prev.end));
     const wd = workDates(p);
     if (a.start && wd.start && a.start < wd.start) out.push('начало работ ' + fmtDate(a.start) + ' раньше начала по договору ' + fmtDate(wd.start));
     if (a.end && wd.end && a.end > wd.end) out.push('окончание ' + fmtDate(a.end) + ' позже срока по договору ' + fmtDate(wd.end));
     (a.imported.matsLeft || []).forEach(t => out.push('материал не найден в «Материалах»: ' + t));
     if ((a.type === 'АОСР' || a.type === 'АООК') && !(a.materials || []).length && !(a.imported.matsLeft || []).length && a.imported.matsText) out.push('материалы из исходного акта не привязаны: ' + a.imported.matsText.slice(0, 120));
-    (a.imported.repsLeft || []).forEach(t => out.push('подписант не найден в «Представителях»: ' + t));
+    // подписант, которого не нашли при загрузке, — пока его роль в акте не назначена вручную
+    (a.imported.repsLeft || []).forEach(t => { const i = REP_ROLES.findIndex(r => t.includes(r)); if (i < 0 || !a['rep' + i]) out.push('подписант не найден в «Представителях»: ' + t); });
     v.warnings.forEach(w => out.push(w));
     return out;
   }
@@ -390,7 +408,9 @@
     const name = (a.manualName || (w ? w.name : '') || '') + (a.axes ? ' ' + a.axes : '');
     const rd = rdFor(p, a, w);
     const project = (rd.code ? 'шифр ' + rd.code : '') + (a.sheets ? (rd.code ? ', ' : '') + a.sheets : '');
-    const docs = a.docs || (w ? s(w.docs) : '');
+    // исполнительные схемы, отмеченные в акте (справочник «Исполнительные схемы»), — если п. 4 не заполнен вручную
+    const schemesTxt = (a.schemeIds || []).map(id => (p.schemes || []).find(x => x.id === id)).filter(Boolean).map(schemeLabel).join('; ');
+    const docs = a.docs || schemesTxt || (w ? s(w.docs) : '');
     // представитель, выбранный в карточке акта (a.rep0…a.rep4), важнее автоматического выбора по роли и дате
     const reps = REP_ROLES.map((role, i) => (a['rep' + i] && p.people.find(r => r.id === a['rep' + i])) || pickRep(p, role, date, executorKey));
     const number = actNumber(p, a);
@@ -492,10 +512,11 @@
   //  «изменение на сумму» — к доп. работам (пусто — по позициям этого ДС в смете);
   //  «новая цена основных работ» (priceMode 'new') — заменяет цену основных работ, доп. работы по другим ДС сохраняются;
   //  «новая общая цена» ('total') — заменяет всё (в неё уже вошли прежние ДС)
-  function contractPriceNow(p) {
+  // upTo — дата (ISO): учитывать только ДС, подписанные не позже неё (для КС — на дату составления)
+  function contractPriceNow(p, upTo) {
     const start = num(p.settings.contractPrice);
     let base = start, extra = 0;
-    const steps = dsList(p).map(d => {
+    const steps = dsList(p).filter(d => !upTo || !d.date || d.date <= upTo).map(d => {
       const before = base + extra;
       if (d.priceMode === 'new' && s(d.newPrice) !== '') base = num(d.newPrice);
       else if (d.priceMode === 'total' && s(d.newPrice) !== '') { base = num(d.newPrice); extra = 0; }
@@ -595,7 +616,9 @@
   // [{ lvl: 'err' | 'warn', where: '#/раздел', text }]
   function projectCheck(p) {
     const out = [], st = p.settings;
-    const E = (where, text) => out.push({ lvl: 'err', where, text }), W = (where, text) => out.push({ lvl: 'warn', where, text });
+    // actId — замечание по конкретному акту (кнопка «Исправить» откроет его карточку)
+    let actId = null;
+    const E = (where, text) => out.push({ lvl: 'err', where, text, actId: where === '#/acts' ? actId : null }), W = (where, text) => out.push({ lvl: 'warn', where, text, actId: where === '#/acts' ? actId : null });
     if (!st.objectName) E('#/settings', 'Не указано наименование объекта — пусто в актах и в строке «Объект» КС-2.');
     if (!st.address) W('#/settings', 'Не указан адрес объекта.');
     if (!st.contractNo) W('#/settings', 'Не указан номер договора (КС-2, КС-3, смета, реестр).');
@@ -610,11 +633,12 @@
     const acts = p.acts.filter(a => a.type);
     const nums = {}, ambig = {};
     acts.forEach(a => {
+      actId = a.id;
       const v = actView(p, a), label = a.type + ' № ' + v.number;
       v.warnings.forEach(t => E('#/acts', label + ': ' + t + '.'));
       if (!v.name) E('#/acts', label + ': нет наименования работ.');
       const rd = rdFor(p, a, p.works.find(x => x.id === a.workId));
-      if (!rd.code) W('#/works', label + ': не задан шифр РД (ни у раздела, ни общий).');
+      if (!rd.code) W('#/rd', label + ': не задан шифр РД (ни у раздела, ни общий).');
       // сроки — с учётом доп. соглашений
       const wd = workDates(p);
       if (wd.start && a.start && a.start < wd.start) W('#/acts', label + ': начало работ ' + fmtDate(a.start) + ' раньше начала по договору ' + fmtDate(wd.start) + '.');
@@ -639,6 +663,7 @@
         (ambig[k] = ambig[k] || { role, ok, acts: [] }).acts.push(a.type + ' № ' + v.number);
       });
     });
+    actId = null;
     Object.values(ambig).forEach(x => {
       const who = x.ok.map(r => shortName(r.fullName));
       W('#/people', 'С ролью «' + x.role + '» одновременно действуют ' + who.join(', ') + ' В акты (' + (x.acts.length > 4 ? x.acts.slice(0, 3).join(', ') + ' и ещё ' + (x.acts.length - 3) : x.acts.join(', ')) + ') попадёт ' + who[who.length - 1] + ' Если нужен другой — проставьте даты «с/по» в «Представителях» или выберите подписанта в акте.');
@@ -689,9 +714,24 @@
         if (d.date && ks.periodTo && ks.periodTo < d.date && ksItems(p).some(x => x.r.dsId === d.id)) W('#/smeta', 'В КС за период по ' + fmtDate(ks.periodTo) + ' попали работы по ' + lbl + ', подписанному позже.');
       });
     }
+    // ПОС: продолжительность строительства — сроки по договору и акты не должны выходить за неё
+    const posM = num(p.settings.posMonths), wdP = workDates(p);
+    if (posM && wdP.start) {
+      const st0 = parseDate(wdP.start), lim = new Date(st0); lim.setMonth(lim.getMonth() + Math.floor(posM)); lim.setDate(lim.getDate() + Math.round((posM % 1) * 30));
+      const limIso = lim.getFullYear() + '-' + pad2(lim.getMonth() + 1) + '-' + pad2(lim.getDate());
+      if (wdP.end && wdP.end > limIso) W('#/settings', 'Окончание работ ' + fmtDate(wdP.end) + ' позже срока по ПОС (' + posM + ' мес. от начала ' + fmtDate(wdP.start) + ' — до ' + fmtDate(limIso) + ').');
+      const late = p.acts.filter(a => a.end && a.end > limIso);
+      if (late.length) W('#/acts', 'Актов с окончанием работ позже срока по ПОС (' + fmtDate(limIso) + '): ' + late.length + '.');
+    }
+    // ПД без РД: по разделу проекта (КР, АР, ИОС…) не загружен ни один раздел рабочей документации
+    const rdHave = (p.rdSections || []).filter(r => r.stage !== 'П').map(r => r.section);
+    (p.rdSections || []).filter(r => r.stage === 'П' && PD_TO_RD[r.section.replace(/\.\d+$/, '')]).forEach(r => {
+      const need = PD_TO_RD[r.section.replace(/\.\d+$/, '')];
+      if (!need.some(x => rdHave.includes(x))) W('#/rd', 'По разделу ПД ' + r.section + ' (' + r.code + ') не загружена рабочая документация (' + need.join(', ') + ') — в актах шифр РД будет пустым или общим.');
+    });
     // акты, загруженные из чужой ИД: что ещё не приведено к нашему формату
     const imp = p.acts.filter(a => a.imported && !a.importDone && importIssues(p, a).length);
-    if (imp.length) W('#/acts', 'Акты из чужой ИД требуют исправлений: ' + imp.length + ' (в «Журнале актов» — отметка «чужая ИД», список «что исправить» в карточке акта).');
+    if (imp.length) W('#/acts', 'Акты из чужой ИД требуют исправлений: ' + imp.length + ' (в «Актах освидетельствования» — отметка «чужая ИД», список «что исправить» в карточке акта).');
     return out;
   }
 
@@ -704,6 +744,6 @@
     matNo, matName, matLabel, matDocs, matText, matUntil, matExpired,
     workLabel, actNumber, actView, parties, smetaRow, smetaRows, smetaTotals,
     ksPeriodMode, ksItems, ksTotals, vatSplit, netOf, vatTop,
-    rdSheets, sheetsText, sheetsParse, importIssues, compactCode, unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
+    schemeLabel, rdSheets, sheetsText, sheetsParse, importIssues, compactCode, unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
   };
 })(typeof window !== 'undefined' ? window : globalThis);

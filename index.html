@@ -23,36 +23,50 @@
         <small id="projName">—</small>
       </div>
     </div>
+    <button class="qs-btn" id="qsBtn" title="Поиск по объекту (Ctrl+K)">🔍 <span class="hide-sm">Поиск…</span><kbd class="hide-sm">Ctrl K</kbd></button>
     <span class="save-state" id="saveState"></span>
     <a class="save-state" id="syncState" href="#/project" hidden></a>
     <button class="btn btn-ghost hide-sm" id="saveFileTop" title="Сохранить проект в файл">Сохранить файл</button>
   </header>
 
   <nav class="sidebar" id="sidebar">
-    <div class="nav-group">Данные</div>
-    <a href="#/import" data-view="import">Загрузка документов</a>
-    <a href="#/settings" data-view="settings">Объект и договор</a>
-    <a href="#/orgs" data-view="orgs">Организации</a>
-    <a href="#/people" data-view="people">Представители</a>
-    <a href="#/materials" data-view="materials">Материалы</a>
-    <a href="#/balance" data-view="balance">Остатки материалов</a>
-    <a href="#/works" data-view="works">Справочник работ</a>
-    <a href="#/acts" data-view="acts">Журнал актов</a>
-    <div class="nav-group">КС и ОЖР</div>
-    <a href="#/smeta" data-view="smeta">Смета, КС-2, КС-3</a>
-    <a href="#/ozhr" data-view="ozhr">Общий журнал работ</a>
-    <div class="nav-group">Выгрузка</div>
-    <a href="#/check" data-view="check">Проверка комплекта</a>
-    <a href="#/docs" data-view="docs">Документы PDF / Word</a>
-    <div class="nav-group">Прочее</div>
-    <a href="#/project" data-view="project">Проекты и файлы</a>
-    <a href="#/lists" data-view="lists">Списки</a>
-    <a href="#/help" data-view="help">Инструкция</a>
+    <a href="#/import" data-view="import" class="nav-upload">&#8682; Загрузить документ</a>
+    <a href="#/home" data-view="home"><span class="e">🏠</span>Обзор объекта</a>
+    <div class="nav-group"><span class="num">1</span>Договор и участники</div>
+    <a href="#/settings" data-view="settings"><span class="e">📄</span>Договор и доп. соглашения</a>
+    <a href="#/orgs" data-view="orgs" data-also="people"><span class="e">👥</span>Участники строительства<span class="cnt" data-cnt="parties"></span></a>
+    <a href="#/rd" data-view="rd"><span class="e">📐</span>Проектная и рабочая документация<span class="cnt" data-cnt="rd"></span></a>
+    <div class="nav-group"><span class="num">2</span>Материалы</div>
+    <a href="#/materials" data-view="materials"><span class="e">🧱</span>Материалы и документы о качестве<span class="cnt" data-cnt="materials"></span></a>
+    <a href="#/balance" data-view="balance"><span class="e">📦</span>Движение материалов</a>
+    <div class="nav-group"><span class="num">3</span>Акты и журналы</div>
+    <a href="#/acts" data-view="acts"><span class="e">📝</span>Акты освидетельствования<span class="cnt" data-cnt="acts"></span></a>
+    <a href="#/schemes" data-view="schemes"><span class="e">📏</span>Исполнительные схемы</a>
+    <a href="#/ozhr" data-view="ozhr"><span class="e">📓</span>Общий журнал работ</a>
+    <a href="#/works" data-view="works"><span class="e">📚</span>Справочник видов работ</a>
+    <div class="nav-group"><span class="num">4</span>Смета и КС</div>
+    <a href="#/smeta" data-view="smeta"><span class="e">💰</span>Смета, КС-2, КС-3</a>
+    <div class="nav-group"><span class="num">5</span>Сдача заказчику</div>
+    <a href="#/check" data-view="check"><span class="e">✅</span>Проверка комплекта<span class="cnt" data-cnt="check"></span></a>
+    <a href="#/docs" data-view="docs"><span class="e">🖨</span>Реестр и выгрузка ИД</a>
+    <div class="nav-sep"></div>
+    <a href="#/project" data-view="project" class="nav-svc">Проекты и файлы</a>
+    <a href="#/lists" data-view="lists" class="nav-svc">Списки</a>
+    <a href="#/help" data-view="help" class="nav-svc">Инструкция</a>
     <div class="app-ver" id="appVer"></div>
   </nav>
   <div class="scrim" id="scrim"></div>
 
   <main class="main" id="main"></main>
+
+  <!-- нижнее меню на телефоне -->
+  <nav class="bottom-nav" id="bottomNav">
+    <a href="#/home" data-view="home"><span>🏠</span>Обзор</a>
+    <a href="#/acts" data-view="acts"><span>📝</span>Акты</a>
+    <a href="#/import" data-view="import" class="up"><span>⇪</span>Загрузить</a>
+    <a href="#/materials" data-view="materials"><span>🧱</span>Материалы</a>
+    <button type="button" id="bnMenu"><span>☰</span>Меню</button>
+  </nav>
 
   <dialog id="dlg" class="dlg">
     <form method="dialog" id="dlgForm" class="dlg-inner">

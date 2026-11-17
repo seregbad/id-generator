@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '50 (13.11.2026)';
+  const APP_VERSION = '60 (17.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -63,16 +63,38 @@
 
   // ================= уведомления =================
   let toastTimer;
-  function toast(t) {
+  // undo — функция: в уведомлении появится кнопка «Отменить» (уведомление висит дольше)
+  function toast(t, undo) {
     const el = $('#toast');
-    el.textContent = t; el.classList.add('show');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
+    el.textContent = t;
+    el.classList.toggle('has-undo', !!undo);
+    if (undo) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-undo'; b.textContent = 'Отменить';
+      b.addEventListener('click', () => { el.classList.remove('show'); undo(); });
+      el.appendChild(b);
+    }
+    el.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), undo ? 8000 : 3200);
+  }
+  // действие с возможностью отмены: снимок проекта до него, «Отменить» в уведомлении вернёт как было
+  // msg — строка или функция (текст по итогам действия); onUndo — что ещё вернуть кроме проекта
+  function undoable(msg, fn, onUndo) {
+    const snap = JSON.stringify(P), id = P.id;
+    fn();
+    toast(typeof msg === 'function' ? msg() : msg, () => {
+      store.projects[id] = C.normalize(JSON.parse(snap));
+      if (P.id === id) P = store.projects[id];
+      onUndo && onUndo();
+      closeDialog(); touch(); render(); toast('Отменено');
+    });
   }
 
   // ================= диалог =================
   const dlg = $('#dlg');
   let dlgOnClose = null;
-  function openDialog(title, bodyEl, buttons, onClose) {
+  // o: { page: true } — большая карточка почти на весь экран (карточка акта)
+  function openDialog(title, bodyEl, buttons, onClose, o) {
+    dlg.classList.toggle('dlg-page', !!(o && o.page));
     $('#dlgTitle').textContent = title;
     const body = $('#dlgBody'); body.innerHTML = ''; body.appendChild(bodyEl);
     const foot = $('#dlgFoot'); foot.innerHTML = '';
@@ -109,7 +131,58 @@
   const orgKeys = () => P.orgs.filter(o => o.key).map(o => ({ v: o.key, l: o.key + ' — ' + (o.role ? o.role + ', ' : '') + (o.name || '') }));
   // непринятые изменения позиции из ДС (r.pendingDs): применить — как ручное изменение по ДС («было → стало» запоминается)
   let smetaRedraw = () => render();
+  let smetaTab = 't1'; // открытая вкладка экрана сметы (сохраняется при перерисовке)
+  let settingsTab = 't1'; // и экрана договора
+  let ozhrTab = 't1';     // и общего журнала
   const pendingOf = r => (r.pendingDs || []).filter(x => C.dsById(P, x.dsId));
+  // замечания по акту → раздел карточки, где это правится
+  function actIssueSec(t) {
+    if (/^не указан раздел/.test(t)) return 'main';
+    if (/п\. 6/.test(t)) return 'texts';
+    if (/представител|выполнил «/.test(t)) return 'reps';
+    if (/истёк документ|материал|документ о качестве|п\. 4|схем/.test(t)) return 'mats';
+    if (/лист|шифр|раздел/.test(t)) return 'proj';
+    return 'main';
+  }
+  // все замечания по акту: проверка акта + (для чужой ИД) что привести к нашему формату
+  function actIssues(a) {
+    const list = C.actView(P, a).warnings.concat(a.imported && !a.importDone ? C.importIssues(P, a) : []);
+    return [...new Set(list)].map(text => ({ text, sec: actIssueSec(text), lvl: /истёк|нет представителя|позже|раньше|не указаны даты|не указан тип/.test(text) ? 'r' : 'w' }));
+  }
+  // материал: поставлено, израсходовано по актам, остаток
+  function matBal(m) {
+    const uses = P.acts.filter(a => a.type && (a.materials || []).includes(m.id)).map(a => ({ a, qty: a.matQty && C.s(a.matQty[m.id]) !== '' ? C.num(a.matQty[m.id]) : null }));
+    const used = Math.round(uses.reduce((x, u) => x + (u.qty || 0), 0) * 1000) / 1000, supplied = C.num(m.qty);
+    return { supplied, used, uses, rest: C.s(m.qty) === '' ? null : Math.round((supplied - used) * 1000) / 1000 };
+  }
+  // документ истекает в ближайшие 30 дней
+  const matSoon = m => { const u = C.matUntil(m); if (!u || C.matExpired(m)) return false; const d = C.parseDate(u); return !!d && (d - new Date()) / 864e5 < 30; };
+  function matIssues(m, b) {
+    const out = [];
+    if (C.matExpired(m)) out.push({ lvl: b.rest === null || b.rest > 0 ? 'r' : 'w', text: 'Документ о качестве истёк ' + C.fmtDate(C.matUntil(m)) + (b.uses.length ? '; в актах: ' + b.uses.map(u => u.a.type + ' № ' + C.actNumber(P, u.a)).join(', ') : ''), fix: 'Обновить документ' });
+    else if (matSoon(m)) out.push({ lvl: 'w', text: 'Документ истекает ' + C.fmtDate(C.matUntil(m)), fix: 'Открыть' });
+    if (!C.matDocs(m)) out.push({ lvl: 'w', text: 'Нет документа о качестве', fix: 'Добавить' });
+    if (m.vk === 'Не соответствует') out.push({ lvl: 'r', text: 'Входной контроль: не соответствует', fix: 'Открыть' });
+    if (b.rest !== null && b.rest < 0) out.push({ lvl: 'r', text: 'По актам израсходовано больше, чем поставлено (' + C.qty(b.used) + ' из ' + C.qty(b.supplied) + ')', fix: 'Открыть' });
+    return out;
+  }
+  // «следующая захватка / этап»: те же поля, даты — сразу после этого акта, такой же длительности
+  function nextAct(a, redraw) {
+    const iso = d => d.getFullYear() + '-' + C.pad2(d.getMonth() + 1) + '-' + C.pad2(d.getDate());
+    const s0 = C.parseDate(a.start), e0 = C.parseDate(a.end);
+    const cp = JSON.parse(JSON.stringify(a));
+    Object.assign(cp, { id: C.uid(), manualNo: '', print: '', printedNo: '', actDate: '', matQty: {}, sheetsCount: '', note: '' });
+    if (e0) {
+      const days = s0 ? Math.round((e0 - s0) / 864e5) : 0;
+      const ns = new Date(e0); ns.setDate(ns.getDate() + 1);
+      const ne = new Date(ns); ne.setDate(ne.getDate() + days);
+      cp.start = iso(ns); cp.end = iso(ne);
+    }
+    P.acts.splice(P.acts.indexOf(a) + 1, 0, cp);
+    touch(); redraw && redraw();
+    openEditor('acts', P.acts, cp, false, redraw);
+    toast('Создан следующий акт — проверьте оси, листы и материалы');
+  }
   function pendingText(r, x) {
     const d = C.dsById(P, x.dsId), lbl = 'ДС № ' + (d.no || '—') + ': ';
     const was = C.smetaRow(r).total;
@@ -184,7 +257,7 @@
       search: r => [r.fullName, r.position, r.role, r.orgKey].join(' ')
     },
     materials: {
-      title: 'Материалы', one: 'Материал',
+      title: 'Материалы и документы о качестве', one: 'Материал',
       intro: 'Каждая партия с документами о качестве. Номер (001, 002…) — по порядку в списке. Просроченные документы подсвечиваются.',
       fields: () => [
         F('name', 'Наименование материала / изделия', 'text', { req: 1, wide: 1 }),
@@ -197,11 +270,20 @@
         F('deliveryDate', 'Дата поставки', 'date'), F('vk', 'Результат входного контроля', 'select', { opts: () => P.lists.vk, empty: 'Соответствует (по умолчанию)' }),
         F('qty', 'Количество', 'number'), F('unit', 'Ед. изм.', 'combo', { opts: units })
       ],
-      row: m => ({
-        num: C.matNo(P, m), title: C.matName(m) || 'Без названия', sub: C.matDocs(m) || 'нет документов о качестве',
-        badges: [C.matExpired(m) ? { t: 'документ истёк ' + C.fmtDate(C.matUntil(m)), c: 'warn' } : null, m.vk === 'Не соответствует' ? { t: 'не соответствует', c: 'danger' } : null],
-        warn: C.matExpired(m)
-      }),
+      // компактная строка: документ, поставлено, в актах, остаток, срок; замечания — по значку статуса
+      row: m => {
+        const b = matBal(m), u = m.unit ? ' ' + m.unit : '';
+        return {
+          no: String(C.matNo(P, m)), title: C.matName(m) || 'Без названия',
+          cols: [['Документ о качестве', C.matDocs(m) || 'нет', C.matDocs(m) ? '' : 'w'],
+            ['Поставлено', C.s(m.qty) === '' ? '—' : C.qty(b.supplied) + u, C.s(m.qty) === '' ? 'dim' : ''],
+            ['В актах', b.uses.length ? (b.used ? C.qty(b.used) + u : 'в ' + b.uses.length + ' акт.') : '—', b.uses.length ? '' : 'dim'],
+            ['Остаток', b.rest === null ? '—' : C.qty(b.rest) + u, b.rest !== null && b.rest < 0 ? 'r' : b.rest === null ? 'dim' : ''],
+            ['Действует до', C.matUntil(m) ? C.fmtDate(C.matUntil(m)) : '—', C.matExpired(m) ? 'r' : matSoon(m) ? 'w' : C.matUntil(m) ? '' : 'dim']],
+          colsCls: 'cols-mats',
+          issues: matIssues(m, b)
+        };
+      },
       preview: m => C.matText(m),
       search: m => [m.name, m.mark, m.doc1No, m.doc2No, m.supplier].join(' ')
     },
@@ -211,7 +293,7 @@
       fields: () => [
         F('code', 'Код', 'text', { hint: 'Например ФП-01' }),
         F('actType', 'Тип акта', 'select', { opts: () => P.lists.actTypes }),
-        F('section', 'Раздел', 'combo', { opts: () => P.lists.sections, hint: 'Шифр РД берётся по разделу из таблицы «Разделы РД»' }),
+        F('section', 'Раздел', 'combo', { opts: () => P.lists.sections, hint: 'Шифр берётся по разделу из «Проектной и рабочей документации»' }),
         F('projCode', 'Особый шифр РД для этого вида работ', 'text', { hint: 'Только если отличается от шифра раздела (например, работы по другому комплекту)' }),
         F('name', 'Наименование работ / конструкций', 'textarea', { req: 1, wide: 1 }),
         F('norms', 'Работы выполнены в соответствии с (нормативы)', 'textarea', { wide: 1 }),
@@ -261,15 +343,24 @@
           }),
           F('sheets', 'Листы проекта', 'text', { rerender: 1, hint: (() => { const v = C.actView(P, a); return 'В акте, п. 2: «' + (v.project || '—') + '» — шифр взят: ' + v.rdSource + '. Листы добавляются после шифра.'; })() }),
           // листы из перечня раздела ПД / РД — галочками; в поле выше пишется «листы 3–5»
-          ...(C.rdSheets(P, a.section).length ? [F('sheetsPick', 'Выбрать листы раздела ' + a.section, 'checks', {
+          ...(C.rdSheets(P, a.section).length ? [F('sheetsPick', 'Листы раздела ' + a.section + ' — нажмите нужные', 'pills', {
             rerender: 1,
-            opts: () => C.rdSheets(P, a.section).map(x => ({ v: String(x.no), l: x.no + ' — ' + x.name })),
-            hint: 'Отмеченные листы попадут в «Листы проекта»'
+            opts: () => C.rdSheets(P, a.section).map(x => ({ v: String(x.no), l: x.no + ' ' + x.name })),
+            hint: 'Выбранные листы попадут в «Листы проекта»'
           })] : []),
           F('importDone', 'Акт из чужой ИД приведён к нашему формату — убрать из списка «что исправить»', 'check', { wide: 1, show: () => !!a.imported }),
+          // материалы из исходного акта, которые не нашлись в «Материалах», — выбрать вручную
+          ...((a.imported && a.imported.matsLeft) || []).map((t, i) => F('matFix' + i, 'Материал из исходного акта: «' + t + '» — это', 'select', {
+            wide: 1, rerender: 1, opts: () => P.materials.map(m => ({ v: m.id, l: C.matLabel(P, m) })), empty: '— выберите из «Материалов» —',
+            hint: 'Выбранный материал добавится к акту, строка уйдёт из «что исправить»'
+          })),
           F('materials', 'Материалы', 'mats', { wide: 1, show: () => a.type === 'АОСР' || isAOOK }),
           F('forceRegistry', 'Реестр документов о качестве — приложением к акту, даже если документов 5 и меньше (при 6 и больше — всегда, по форме 344/пр)', 'check', { wide: 1, show: () => a.type === 'АОСР' || isAOOK }),
-          F('docs', isAOOK ? 'Исполнительные геодезические схемы (п. 5а)' : 'Исполнительные схемы, документы (п. 4)', 'textarea', { wide: 1, ph: w ? w.docs : '' }),
+          // схемы из справочника «Исполнительные схемы» — галочками; в акт идут, если поле ниже пустое
+          ...((P.schemes || []).length ? [F('schemeIds', 'Исполнительные схемы — нажмите нужные', 'pills', {
+            opts: () => P.schemes.map(x => ({ v: x.id, l: C.schemeLabel(x) })), hint: 'Попадают в п. ' + (isAOOK ? '5а' : '4') + ', если поле ниже пустое'
+          })] : []),
+          F('docs', isAOOK ? 'Исполнительные геодезические схемы (п. 5а)' : 'Исполнительные схемы, документы (п. 4)', 'textarea', { wide: 1, ph: (C.actView(P, Object.assign({}, a, { docs: '' })).docs) || (w ? w.docs : '') }),
           F('expertise', 'Результаты экспертиз, лаб. испытаний (п. 5б)', 'textarea', { wide: 1, show: () => isAOOK }),
           F('tests', 'Испытания и опробования (п. 6)', 'textarea', { wide: 1, show: () => isAOOK }),
           F('hiddenActs', 'Освидетельствованные скрытые работы, №№ АОСР (п. 3)', 'textarea', { wide: 1, show: () => isAOOK }),
@@ -285,6 +376,36 @@
           F('print', 'Отметить для пакетной печати', 'check', { wide: 1 })
         ];
       },
+      // карточка акта — по разделам-гармошкам, на весь экран
+      page: true,
+      titleOf: a => { const v = C.actView(P, P.acts.find(x => x.id === a.id) || a); return (a.type ? a.type + ' № ' + (v.number || '—') + ' — ' : 'Акт — ') + (v.name || 'без наименования'); },
+      sections: a => {
+        const v = C.actView(P, a), iss = actIssues(a);
+        const has = sec => iss.some(x => x.sec === sec);
+        const w = P.works.find(x => x.id === a.workId);
+        const dates = a.start || a.end ? (a.start && a.end && a.start !== a.end ? C.fmtDate(a.start) + ' – ' + C.fmtDate(a.end) : C.fmtDate(a.end || a.start)) : 'даты не указаны';
+        const mats = (a.materials || []).map(id => P.materials.find(m => m.id === id)).filter(Boolean);
+        const sch = (a.schemeIds || []).length;
+        const edited = ['manualNorms', 'manualNext', 'extra', 'manualAttach', 'expertise', 'tests', 'hiddenActs', 'loadCond'].filter(k => C.s(a[k])).length;
+        return [
+          { id: 'main', title: 'Основное', keys: ['type', 'section', 'workId', 'manualName', 'axes', 'manualNo', 'executor', 'start', 'end', 'actDate'], sum: [a.type, a.section, dates].filter(Boolean).join(' · '), mark: has('main') ? 'w' : 'ok', open: true },
+          { id: 'proj', title: 'Проект', keys: ['sheets', 'sheetsPick'], sum: v.project || 'шифр не задан', mark: has('proj') ? 'w' : 'ok', open: true },
+          { id: 'mats', title: 'Материалы и схемы', keys: [/^matFix/, 'materials', 'forceRegistry', 'schemeIds', 'docs'], sum: [mats.length ? mats.map(m => C.matName(m)).slice(0, 3).join(', ') + (mats.length > 3 ? ' и ещё ' + (mats.length - 3) : '') : 'материалов нет', sch ? 'схем: ' + sch : ''].filter(Boolean).join(' · '), mark: has('mats') ? 'w' : 'ok', open: true },
+          { id: 'reps', title: 'Подписанты', keys: [/^rep\d$/], sum: has('reps') ? 'кого-то не хватает' : 'подобраны автоматически по ролям и датам', mark: has('reps') ? 'w' : 'ok', open: has('reps') },
+          { id: 'texts', title: 'Тексты пунктов', keys: ['manualNorms', 'manualNext', 'expertise', 'tests', 'hiddenActs', 'loadCond', 'extra', 'manualAttach'], sum: (w ? 'из справочника работ' : 'вид работ не выбран — тексты вручную') + ' · изменено: ' + edited, mark: has('texts') ? 'w' : '', open: has('texts') },
+          { id: 'print', title: 'Печать и реестр', keys: ['copies', 'sheetsCount', 'note', 'conditions', 'print', 'importDone'], sum: [(a.copies || P.settings.copies || '—') + ' экз.', a.print ? 'отмечен к печати' : '', a.imported ? (a.importDone ? 'чужая ИД — приведён' : 'чужая ИД') : ''].filter(Boolean).join(' · '), mark: '', open: false }
+        ];
+      },
+      // что не хватает до печати — каждый пункт ведёт в свой раздел
+      status: a => {
+        const iss = actIssues(a);
+        const src = a.imported ? 'Акт из чужой ИД — ' + (a.imported.file || '') + (a.imported.no ? ', исходный № ' + a.imported.no + (a.imported.date ? ' от ' + C.fmtDate(a.imported.date) : '') : '') : '';
+        return { ok: !iss.length, title: iss.length ? 'Не хватает до печати: ' + iss.length : 'Акт готов к печати', note: src, items: iss };
+      },
+      footButtons: (item, save) => [
+        { label: '🗎 PDF', title: 'Сохранить и сформировать документ', onClick: () => { if (save()) makeAct(item); } },
+        { label: '⤵ Следующий акт', title: 'Сохранить и создать следующий: копия, даты — сразу после этого акта', onClick: () => { if (save()) nextAct(item, () => render()); } }
+      ],
       // акт из чужой ИД: что исправить — над полями карточки
       banner: a => {
         if (!a.imported) return '';
@@ -294,6 +415,12 @@
       },
       onOpen: a => { const list = C.rdSheets(P, a.section).map(x => String(x.no)); a.sheetsPick = C.sheetsParse(a.sheets).filter(n => list.includes(n)); },
       onChange: (a, k) => {
+        const mf = /^matFix(\d+)$/.exec(k);
+        if (mf && a[k]) {
+          a.materials = (a.materials || []).concat(a.materials && a.materials.includes(a[k]) ? [] : [a[k]]);
+          a.imported.matsLeft = a.imported.matsLeft.filter((x, i) => i !== +mf[1]);
+          delete a[k];
+        }
         if (k === 'sheetsPick') a.sheets = C.sheetsText(a.sheetsPick);
         if (k === 'section' || k === 'sheets' || k === 'sheetsPick') {
           // отметки листов — по тексту поля (руками вписанные номера тоже отмечаются)
@@ -305,18 +432,33 @@
           if (w) { if (!a.type && w.actType) a.type = w.actType; if (!a.section && w.section) a.section = w.section; }
         }
       },
+      // компактная строка: № и название, статус (✓ / ⚠ N с раскрывающимся списком), ниже — даты, подписанты, листы, материалы
       row: a => {
         const v = C.actView(P, a);
-        const iss = a.imported && !a.importDone ? C.importIssues(P, a) : [];
+        const mats = (a.materials || []).map(id => P.materials.find(m => m.id === id)).filter(Boolean).map(m => C.matName(m));
+        const dates = a.start || a.end ? (a.start && a.end && a.start !== a.end ? C.fmtDate(a.start) + ' – ' + C.fmtDate(a.end) : C.fmtDate(a.end || a.start)) : '—';
         return {
-          num: '', title: (a.type ? a.type + ' № ' + v.number + ' — ' : '') + (v.name || 'Без наименования'),
-          sub: [a.start || a.end ? C.fmtDate(a.start) + ' – ' + C.fmtDate(a.end) : '', v.date ? 'акт от ' + C.fmtDate(v.date) : '', v.signers].filter(Boolean).join(' · '),
-          badges: (a.imported ? [{ t: 'чужая ИД' + (a.imported.no ? ', исх. № ' + a.imported.no : ''), c: a.importDone ? 'ok' : '' }, iss.length ? { t: 'исправить: ' + iss.length, c: 'warn' } : null] : [])
-            .concat(v.warnings.map(w => ({ t: w, c: 'warn' }))),
-          warn: v.warnings.length > 0 || iss.length > 0
+          no: a.type ? a.type + ' № ' + (v.number || '—') : 'тип не указан', title: v.name || 'Без наименования',
+          tags: [a.imported ? { t: 'чужая ИД' + (a.imported.no ? ', исх. № ' + a.imported.no : ''), c: a.importDone ? 'ok' : '' } : null],
+          cols: [['Даты работ', dates, a.start || a.end ? '' : 'dim'], ['Акт от', v.date ? C.fmtDate(v.date) : '—', v.date ? '' : 'dim'], ['Подписанты', v.signers || '—', v.signers ? '' : 'dim'], ['Листы', a.sheets || '—', a.sheets ? '' : 'dim'], ['Материалы', mats.join(', ') || '—', mats.length ? '' : 'dim']],
+          colsCls: 'cols-acts',
+          issues: actIssues(a)
         };
       },
       search: a => { const v = C.actView(P, a); return [v.number, v.name, a.type, a.section, a.imported ? 'чужая ид' + (a.importDone ? '' : ' исправить') : ''].join(' '); }
+    },
+    schemes: {
+      title: 'Исполнительные схемы', one: 'Исполнительная схема',
+      fields: () => [
+        F('no', '№ схемы'), F('date', 'Дата', 'date'),
+        F('name', 'Наименование', 'textarea', { req: 1, wide: 1, hint: 'Например: Устройство песчаной подготовки в осях 1-4/А-В' }),
+        F('note', 'Примечание', 'text', { wide: 1 })
+      ],
+      row: x => {
+        const acts = P.acts.filter(a => (a.schemeIds || []).includes(x.id));
+        return { title: C.schemeLabel(x), sub: acts.length ? 'В актах: ' + acts.map(a => (a.type || '') + ' № ' + C.actNumber(P, a)).join(', ') : '', badges: [acts.length ? null : { t: 'не привязана к акту', c: 'warn' }, x.srcFile ? { t: 'из чужой ИД' } : null] };
+      },
+      search: x => [x.no, x.name, x.note].join(' ')
     },
     rdSections: {
       title: 'Проектная и рабочая документация', one: 'Раздел ПД / РД',
@@ -327,7 +469,7 @@
         F('section', 'Раздел', 'combo', { req: 1, opts: () => P.lists.sections, hint: 'Как в поле «Раздел» видов работ и актов: КЖ, КМ, АР…' }),
         F('stage', 'Стадия', 'select', { opts: [{ v: 'П', l: 'П — проектная документация' }], empty: 'Р — рабочая документация (по умолчанию)' }),
         F('code', 'Шифр', 'text', { req: 1, hint: 'Как в штампе, например 038-2024-КЖ0' }),
-        F('docName', 'Наименование раздела', 'text', { wide: 1, ph: P.settings.projectDocName || '', hint: 'Например: Рабочая документация. Конструкции железобетонные. Пусто — наименование из «Объекта и договора»' }),
+        F('docName', 'Наименование раздела', 'text', { wide: 1, ph: P.settings.projectDocName || '', hint: 'Например: Рабочая документация. Конструкции железобетонные. Пусто — наименование из «Договора и доп. соглашений»' }),
         F('designerKey', 'Проектировщик раздела', 'select', { opts: orgKeys, empty: 'Проектировщик объекта' + (C.designerOrg(P) ? ': ' + C.designerOrg(P).key : ''), hint: 'Если раздел разрабатывала другая организация' }),
         F('sheetListText', r && r.stage === 'П' ? 'Тома / разделы' : 'Листы (по строке: «№ — наименование»)', 'textarea', { wide: 1, hint: 'Заполняется при загрузке РД (ведомость рабочих чертежей или штампы). В акте листы выбираются галочками' })
       ];
@@ -387,13 +529,15 @@
         const ds = C.dsById(P, r.dsId), ex = C.dsById(P, r.excludedBy);
         const chs = (r.changes || []).filter(ch => C.dsById(P, ch.dsId));
         const was = chs.length ? chs[0].from : null; // как было по договору
+        const no = C.smetaOrdered(P).indexOf(r); // сквозной номер, как в печатной смете
         return {
-          title: r.name || 'Без названия', sub: C.qty(r.qty) + ' ' + (r.unit || '') + ' × ' + C.money(c.unitPrice) + ' = ' + C.money(c.total) + ' руб.' + (before ? ' · по прошлым КС: ' + C.qty(before) : '') +
+          num: no >= 0 ? String(no + 1) : '', cls: ex ? 'excl' : '',
+          title: r.name || 'Без названия', sub: C.qty(r.qty) + ' ' + (r.unit || '') + ' × ' + C.money(c.unitPrice) + ' = ' + C.money(c.total) + ' руб.' +
             (was ? ' · по договору было: ' + C.qty(was.qty) + ' × ' + C.money(C.num(was.priceWork) + C.num(was.priceMat)) + ' = ' + C.money(C.smetaRow(was).total) : ''),
           badges: [ds ? { t: 'ДС № ' + (ds.no || '—'), c: 'ok' } : null, ex ? { t: 'исключена по ДС № ' + (ex.no || '—'), c: 'warn' } : null,
             ...chs.map(ch => ({ t: 'изменена по ДС № ' + (C.dsById(P, ch.dsId).no || '—') })),
             pendingOf(r).length ? { t: 'есть изменение по ДС — не принято', c: 'warn' } : null,
-            left < -1e-6 ? { t: 'больше, чем в смете', c: 'danger' } : before || C.num(r.qtyNow) ? { t: 'осталось ' + C.qty(Math.max(0, left)) + ' ' + (r.unit || '') } : null],
+            left < -1e-6 && !ex ? { t: 'по КС больше, чем в смете', c: 'danger' } : null],
           // изменение из загруженного ДС — применить или отклонить прямо здесь
           notes: pendingOf(r).map(x => ({ text: pendingText(r, x), buttons: [
             { label: 'Применить', cls: 'btn-primary', onClick: () => { applyPending(r, x); touch(); smetaRedraw(); toast('Изменение из ДС применено'); } },
@@ -503,7 +647,20 @@
       wrap.addEventListener('change', () => onInput(f, Array.from(wrap.querySelectorAll('input:checked')).map(x => x.value), true));
       return wrap;
     }
+    // то же, но «таблетками»: нажал — выбрано (листы РД, схемы в карточке акта)
+    if (f.t === 'pills') {
+      wrap.className = 'field wide';
+      const cur = Array.isArray(v) ? v.map(String) : [];
+      wrap.innerHTML = '<span>' + esc(f.l) + '</span><div class="pills">' + optList(f).map(o => '<button type="button" class="pill' + (cur.includes(String(o.v)) ? ' on' : '') + (o.bad ? ' bad' : '') + '" data-v="' + esc(o.v) + '"' + (o.title ? ' title="' + esc(o.title) + '"' : '') + '>' + esc(o.l) + '</button>').join('') + '</div>' + (f.hint ? '<small>' + esc(f.hint) + '</small>' : '');
+      wrap.addEventListener('click', e => {
+        const b = e.target.closest('.pill'); if (!b) return;
+        b.classList.toggle('on');
+        onInput(f, Array.from(wrap.querySelectorAll('.pill.on')).map(x => x.dataset.v), true);
+      });
+      return wrap;
+    }
     wrap.innerHTML = '<span>' + esc(f.l) + (f.req ? ' <b>*</b>' : '') + '</span>';
+    if (f.help) wrap.firstChild.appendChild(helpTip(f.help)); // пояснение — в «?», а не текстом под полем
     let input;
     if (f.t === 'textarea') {
       input = document.createElement('textarea'); input.rows = 2; input.value = v || '';
@@ -631,26 +788,86 @@
   }
 
   // ================= редактор записи =================
-  function openEditor(schemaKey, arr, item, isNew, after) {
+  // eo: { focus: id раздела карточки — раскрыть и прокрутить к нему }
+  function openEditor(schemaKey, arr, item, isNew, after, eo) {
     const sc = SCHEMA[schemaKey];
     const work = JSON.parse(JSON.stringify(item));
     const body = document.createElement('div');
+    let openSecs = null; // раскрытые разделы карточки — сохраняются при перерисовке
+    let heads = [];      // заголовки разделов — обновляются при вводе (кратко, отметка)
+    const onField = (ff, val, rerender) => {
+      work[ff.k] = val;
+      if (sc.onChange) sc.onChange(work, ff.k);
+      if (ff.rerender && (rerender || ff.t === 'select')) { const top = $('#dlgBody').scrollTop; draw(); $('#dlgBody').scrollTop = top; }
+      else { if (sc.preview) updPrev(); updHeads(); }
+    };
+    const fieldMatch = (f, keys) => keys.some(k => k instanceof RegExp ? k.test(f.k) : k === f.k);
+    const updHeads = () => {
+      if (!sc.sections || !heads.length) return;
+      const secs = sc.sections(work);
+      heads.forEach(h => {
+        const s = secs.find(x => x.id === h.id); if (!s) return;
+        h.sum.textContent = s.sum || '';
+        h.mark.className = 'mark ' + (s.mark || ''); h.mark.textContent = s.mark === 'ok' ? '✓' : s.mark === 'w' ? '⚠' : '';
+      });
+      drawStatus();
+    };
+    let statusEl = null;
+    const drawStatus = () => {
+      if (!statusEl || !sc.status) return;
+      const st = sc.status(work);
+      statusEl.className = 'ed-status ' + (st.ok ? 'ok' : 'w');
+      statusEl.innerHTML = '<div class="ic">' + (st.ok ? '✓' : '⚠') + '</div><div><b>' + esc(st.title) + '</b>' + (st.note ? '<span class="muted small">' + esc(st.note) + '</span>' : '') + '<div class="todo"></div></div>';
+      st.items.forEach(x => {
+        const a = document.createElement('a'); a.tabIndex = 0; a.className = x.lvl === 'r' ? 'r' : ''; a.textContent = x.text;
+        a.addEventListener('click', () => goSec(x.sec));
+        $('.todo', statusEl).appendChild(a);
+      });
+    };
+    const goSec = id => {
+      const el = $('[data-sec="' + id + '"]', body); if (!el) return;
+      el.classList.add('open'); openSecs && openSecs.add(id);
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1400);
+    };
     const draw = () => {
       body.innerHTML = '';
-      const bn = sc.banner && sc.banner(work);
-      if (bn) { const b = document.createElement('div'); b.className = 'row-note editor-banner'; b.innerHTML = '<span>' + bn + '</span>'; body.appendChild(b); }
-      const g = document.createElement('div'); g.className = 'grid';
       if (sc.onOpen && !work._opened) { work._opened = 1; sc.onOpen(work); }
-      sc.fields(work).forEach(f => {
-        if (f.show && !f.show(work)) return;
-        g.appendChild(fieldEl(f, work, (ff, val, rerender) => {
-          work[ff.k] = val;
-          if (sc.onChange) sc.onChange(work, ff.k);
-          if (ff.rerender && (rerender || ff.t === 'select')) { const top = $('#dlgBody').scrollTop; draw(); $('#dlgBody').scrollTop = top; }
-          else if (sc.preview) updPrev();
-        }));
-      });
-      body.appendChild(g);
+      const fields = sc.fields(work).filter(f => !f.show || f.show(work));
+      const mk = f => fieldEl(f, work, onField);
+      if (sc.sections) {
+        // статус готовности и разделы-гармошки
+        statusEl = document.createElement('div'); body.appendChild(statusEl); drawStatus();
+        const secs = sc.sections(work);
+        if (!openSecs) openSecs = new Set(secs.filter(s => s.open || s.mark === 'w').map(s => s.id).concat(eo && eo.focus ? [eo.focus] : []));
+        heads = [];
+        const used = new Set();
+        secs.forEach((s, i) => {
+          const fs = fields.filter(f => !used.has(f) && fieldMatch(f, s.keys));
+          if (!fs.length) return;
+          fs.forEach(f => used.add(f));
+          const el = document.createElement('div'); el.className = 'ed-sec' + (openSecs.has(s.id) ? ' open' : ''); el.dataset.sec = s.id;
+          el.innerHTML = '<div class="h" tabindex="0"><span class="n">' + (i + 1) + '</span><span class="t">' + esc(s.title) + '</span><span class="sum"></span><span class="mark"></span><span class="ch">▾</span></div><div class="b"></div>';
+          const h = $('.h', el);
+          const tg = () => { el.classList.toggle('open'); el.classList.contains('open') ? openSecs.add(s.id) : openSecs.delete(s.id); };
+          h.addEventListener('click', tg); h.addEventListener('keydown', e => { if (e.key === 'Enter') tg(); });
+          heads.push({ id: s.id, sum: $('.sum', el), mark: $('.mark', el) });
+          const g = document.createElement('div'); g.className = 'grid';
+          fs.forEach(f => g.appendChild(mk(f)));
+          $('.b', el).appendChild(g);
+          body.appendChild(el);
+        });
+        // поля, не попавшие ни в один раздел — в конце
+        const rest = fields.filter(f => !used.has(f));
+        if (rest.length) { const g = document.createElement('div'); g.className = 'grid'; g.style.marginTop = '10px'; rest.forEach(f => g.appendChild(mk(f))); body.appendChild(g); }
+        updHeads();
+      } else {
+        const bn = sc.banner && sc.banner(work);
+        if (bn) { const b = document.createElement('div'); b.className = 'row-note editor-banner'; b.innerHTML = '<span>' + bn + '</span>'; body.appendChild(b); }
+        const g = document.createElement('div'); g.className = 'grid';
+        fields.forEach(f => g.appendChild(mk(f)));
+        body.appendChild(g);
+      }
       if (sc.preview) {
         const pv = document.createElement('div'); pv.className = 'card small'; pv.style.marginTop = '14px'; pv.id = 'prev';
         body.appendChild(pv); updPrev();
@@ -661,25 +878,148 @@
     const buttons = [];
     if (!isNew) buttons.push({ label: 'Удалить', cls: 'btn-danger', onClick: () => {
       const refs = schemaKey === 'orgs' ? orgRefs(item.key) : '';
-      confirmBox(refs ? 'На организацию «' + item.key + '» ссылаются: ' + refs + '. После удаления эти ссылки станут пустыми. Удалить?' : 'Удалить запись?', 'Удалить', () => { const i = arr.indexOf(item); if (i >= 0) arr.splice(i, 1); touch(); after && after(); }, true);
+      confirmBox(refs ? 'На организацию «' + item.key + '» ссылаются: ' + refs + '. После удаления эти ссылки станут пустыми. Удалить?' : 'Удалить запись?', 'Удалить', () => undoable('Запись удалена', () => { const i = arr.indexOf(item); if (i >= 0) arr.splice(i, 1); touch(); after && after(); }), true);
     } });
-    buttons.push('spacer', { label: 'Отмена', onClick: closeDialog }, {
-      label: 'Сохранить', cls: 'btn-primary', onClick: () => {
-        const miss = sc.fields(work).filter(f => f.req && (!f.show || f.show(work)) && (work[f.k] === undefined || work[f.k] === ''));
-        if (miss.length) { toast('Заполните: ' + miss.map(f => f.l).join(', ')); return; }
-        if (schemaKey === 'orgs') {
-          work.key = String(work.key).trim();
-          if (P.orgs.some(o => o !== item && o.key === work.key)) { toast('Ключ «' + work.key + '» уже занят другой организацией'); return; }
-          if (!isNew && item.key && item.key !== work.key) renameOrgKey(item.key, work.key);
-        }
-        delete work._opened; delete work.sheetsPick; // служебные поля карточки
-        Object.keys(item).forEach(k => delete item[k]);
-        Object.assign(item, work);
-        if (isNew) arr.push(item);
-        touch(); closeDialog(); after && after();
+    // сохранить карточку; false — если не заполнены обязательные поля
+    const save = () => {
+      const miss = sc.fields(work).filter(f => f.req && (!f.show || f.show(work)) && (work[f.k] === undefined || work[f.k] === ''));
+      if (miss.length) { toast('Заполните: ' + miss.map(f => f.l).join(', ')); return false; }
+      if (schemaKey === 'orgs') {
+        work.key = String(work.key).trim();
+        if (P.orgs.some(o => o !== item && o.key === work.key)) { toast('Ключ «' + work.key + '» уже занят другой организацией'); return false; }
+        if (!isNew && item.key && item.key !== work.key) renameOrgKey(item.key, work.key);
       }
+      const w2 = JSON.parse(JSON.stringify(work));
+      delete w2._opened; delete w2.sheetsPick; // служебные поля карточки
+      Object.keys(item).forEach(k => delete item[k]);
+      Object.assign(item, w2);
+      if (isNew && !arr.includes(item)) arr.push(item);
+      isNew = false;
+      touch(); closeDialog(); after && after();
+      return true;
+    };
+    buttons.push('spacer');
+    if (sc.footButtons) sc.footButtons(item, save).forEach(b => buttons.push(b));
+    buttons.push({ label: 'Отмена', onClick: closeDialog }, { label: 'Сохранить', cls: 'btn-primary', onClick: save });
+    const title = (isNew ? 'Новая запись: ' : '') + (sc.titleOf && !isNew ? sc.titleOf(work) : sc.one);
+    openDialog(title, body, buttons, null, { page: !!sc.page });
+    if (eo && eo.focus) setTimeout(() => goSec(eo.focus), 50);
+  }
+
+  // ================= быстрый поиск (Ctrl+K): разделы, акты, материалы, участники, смета… =================
+  function quickSearch() {
+    const body = document.createElement('div');
+    body.innerHTML = '<input type="search" class="qs-in" placeholder="Акт, материал, организация, ФИО, позиция сметы, раздел меню…" autocomplete="off"><div class="qs-list"></div><p class="muted small qs-hint">↑ ↓ — выбрать, Enter — открыть, Esc — закрыть</p>';
+    const inp = $('.qs-in', body), box = $('.qs-list', body);
+    const open = (view, key, arr, it) => () => { closeDialog(); location.hash = '#/' + view; setTimeout(() => openEditor(key, arr, it, false, () => render()), 60); };
+    const all = () => {
+      const out = [];
+      $$('.sidebar a[data-view]').forEach(a => out.push({ ic: '↪', t: a.textContent.replace(/\d+$/, '').trim(), s: 'раздел', go: () => { closeDialog(); location.hash = a.getAttribute('href'); } }));
+      P.acts.filter(a => a.type).forEach(a => { const v = C.actView(P, a); out.push({ ic: '📝', t: a.type + ' № ' + v.number + ' — ' + v.name, s: [C.fmtDate(v.date), a.sheets].filter(Boolean).join(' · '), go: open('acts', 'acts', P.acts, a) }); });
+      P.materials.filter(m => m.name).forEach(m => out.push({ ic: '🧱', t: C.matNo(P, m) + ' ' + C.matName(m), s: C.matDocs(m), go: open('materials', 'materials', P.materials, m) }));
+      P.orgs.forEach(o => out.push({ ic: '🏢', t: (o.key ? o.key + ' — ' : '') + (o.name || ''), s: [o.role, o.inn ? 'ИНН ' + o.inn : ''].filter(Boolean).join(' · '), go: open('orgs', 'orgs', P.orgs, o) }));
+      P.people.forEach(r => out.push({ ic: '👤', t: r.fullName || '', s: [r.position, r.role, r.orgKey].filter(Boolean).join(' · '), go: open('people', 'people', P.people, r) }));
+      P.smeta.filter(r => r.name).forEach(r => out.push({ ic: '💰', t: r.name, s: C.qty(r.qty) + ' ' + (r.unit || '') + ' · смета', go: () => { closeDialog(); smetaTab = 't1'; location.hash = '#/smeta'; } }));
+      P.works.forEach(w => out.push({ ic: '📚', t: C.workLabel(w), s: 'справочник работ', go: open('works', 'works', P.works, w) }));
+      (P.rdSections || []).forEach(r => out.push({ ic: '📐', t: [r.section, r.code, r.name].filter(Boolean).join(' · '), s: 'ПД / РД', go: open('rd', 'rdSections', P.rdSections, r) }));
+      (P.schemes || []).forEach(x => out.push({ ic: '📏', t: C.schemeLabel(x), s: 'исполнительная схема', go: open('schemes', 'schemes', P.schemes, x) }));
+      P.supplements.forEach(d => out.push({ ic: '📄', t: 'ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : ''), s: d.subject || 'доп. соглашение', go: open('settings', 'supplements', P.supplements, d) }));
+      return out;
+    };
+    const src = all();
+    let found = [], sel = 0;
+    const draw = () => {
+      const words = inp.value.toLowerCase().split(/\s+/).filter(Boolean);
+      found = (words.length ? src.filter(x => { const h = (x.t + ' ' + x.s).toLowerCase(); return words.every(w => h.includes(w)); }) : src.filter(x => x.s === 'раздел')).slice(0, 40);
+      sel = Math.min(sel, Math.max(0, found.length - 1));
+      box.innerHTML = found.length ? found.map((x, i) => '<div class="qs-it' + (i === sel ? ' on' : '') + '" data-i="' + i + '"><span class="ic">' + x.ic + '</span><span class="tx"><b>' + esc(x.t) + '</b><span class="muted small">' + esc(x.s || '') + '</span></span></div>').join('') : '<div class="empty">Ничего не найдено</div>';
+      const on = $('.qs-it.on', box); if (on) on.scrollIntoView({ block: 'nearest' });
+    };
+    inp.addEventListener('input', () => { sel = 0; draw(); });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown') { sel = Math.min(found.length - 1, sel + 1); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (found[sel]) found[sel].go(); }
     });
-    openDialog((isNew ? 'Новая запись: ' : '') + sc.one, body, buttons);
+    box.addEventListener('click', e => { const it = e.target.closest('.qs-it'); if (it) found[+it.dataset.i].go(); });
+    openDialog('Поиск по объекту', body, []);
+    draw(); setTimeout(() => inp.focus(), 30);
+  }
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'л' || e.key === 'Л')) { e.preventDefault(); quickSearch(); }
+  });
+
+  // ================= мастер нового объекта: 3 шага =================
+  function newObjectWizard() {
+    const st = P.settings;
+    const w = { objectName: st.objectName || '', address: st.address || '', contractNo: st.contractNo || '', contractDate: st.contractDate || '', contractPrice: st.contractPrice || '', role: C.ROLE.contractor, ourName: '', ourInn: '', custName: '' };
+    let step = 1;
+    const keyOf = n => String(n || '').replace(/^\s*(ООО|АО|ПАО|ЗАО|ОАО|ИП|ФГУП|МУП|ГУП)\s*/i, '').replace(/[«»"']/g, '').trim().slice(0, 30);
+    const body = document.createElement('div');
+    const draw = () => {
+      body.innerHTML = '<div class="wz-steps">' + ['Объект и договор', 'Ваша организация', 'Что дальше'].map((t, i) => '<span class="' + (i + 1 === step ? 'on' : i + 1 < step ? 'done' : '') + '"><b>' + (i + 1 < step ? '✓' : i + 1) + '</b>' + t + '</span>').join('') + '</div>';
+      if (step === 1) {
+        const up = document.createElement('div'); up.className = 'wz-up';
+        up.innerHTML = '<div><b>Есть договор файлом?</b><span class="muted small">Загрузите — объект, номер, дату, цену, сроки и стороны программа заполнит сама.</span></div>';
+        up.appendChild(btn('⇪ Загрузить договор', () => { closeDialog(); location.hash = '#/import'; }, 'btn-primary'));
+        body.appendChild(up);
+        body.appendChild(para('Или заполните вручную:', 'muted small'));
+        body.appendChild(formGrid(w, [
+          F('objectName', 'Наименование объекта', 'text', { wide: 1 }), F('address', 'Адрес объекта', 'text', { wide: 1 }),
+          F('contractNo', 'Номер договора'), F('contractDate', 'Дата договора', 'date'),
+          F('contractPrice', 'Цена договора, руб. с НДС', 'number')
+        ]));
+      } else if (step === 2) {
+        body.appendChild(formGrid(w, [
+          F('role', 'Кто вы на этом объекте', 'select', { wide: 1, rerender: 1, opts: () => [
+            { v: C.ROLE.contractor, l: 'Подрядчик — договор напрямую с заказчиком' },
+            { v: C.ROLE.genContractor, l: 'Генподрядчик — у вас есть субподрядчики' },
+            { v: C.ROLE.subContractor, l: 'Субподрядчик — работаете у генподрядчика' }] }),
+          F('ourName', 'Ваша организация (полное наименование)', 'text', { wide: 1, ph: 'ООО «…»' }), F('ourInn', 'ИНН'),
+          F('custName', w.role === C.ROLE.subContractor ? 'Генподрядчик (наименование)' : 'Заказчик / застройщик (наименование)', 'text', { wide: 1 })
+        ], f => { if (f.k === 'role') draw(); }));
+        body.appendChild(para('Остальное (адреса, ОГРН, СРО, представители) — потом в «Участниках строительства» или загрузкой документов.', 'muted small'));
+      } else {
+        body.appendChild(para('<b>Объект заведён.</b> Дальше удобнее всего загружать документы — программа сама разложит их по разделам:', ''));
+        const g = document.createElement('div'); g.className = 'wz-next';
+        [['📐', 'Проект ПД / РД', 'шифры и листы для п. 2 актов', '#/import'], ['🧱', 'Сертификаты, паспорта, УПД', 'материалы и документы о качестве', '#/import'], ['💰', 'Смету', 'позиции для КС-2 и КС-3', '#/import'], ['📝', 'Первый акт', 'или загрузите чужую ИД', '#/acts?new']].forEach(([ic, t, s, href]) => {
+          const a = document.createElement('a'); a.href = href; a.innerHTML = '<span class="ic">' + ic + '</span><b>' + esc(t) + '</b><span class="muted small">' + esc(s) + '</span>';
+          a.addEventListener('click', () => closeDialog());
+          g.appendChild(a);
+        });
+        body.appendChild(g);
+      }
+      const foot = [];
+      if (step > 1 && step < 3) foot.push({ label: '← Назад', onClick: () => { step--; draw(); } });
+      foot.push('spacer');
+      if (step < 3) foot.push({ label: 'Пропустить мастер', onClick: closeDialog }, { label: step === 2 ? 'Готово →' : 'Далее →', cls: 'btn-primary', onClick: next });
+      else foot.push({ label: 'Закрыть', cls: 'btn-primary', onClick: closeDialog });
+      openDialog('Новый объект — шаг ' + step + ' из 3', body, foot);
+    };
+    const next = () => {
+      if (step === 1) {
+        ['objectName', 'address', 'contractNo', 'contractDate'].forEach(k => { if (C.s(w[k])) st[k] = C.s(w[k]); });
+        if (C.s(w.contractPrice) !== '') st.contractPrice = C.num(w.contractPrice);
+        touch(); updateHeader();
+      }
+      if (step === 2) {
+        const add = (name, role, inn) => {
+          if (!C.s(name)) return null;
+          let key = keyOf(name) || name.slice(0, 30), n = 2;
+          const ex = P.orgs.find(o => o.name === name.trim()); if (ex) return ex;
+          while (P.orgs.some(o => o.key === key)) key = keyOf(name) + ' ' + n++;
+          const o = { id: C.uid(), key, role, name: name.trim(), inn: C.s(inn) };
+          P.orgs.push(o); return o;
+        };
+        const our = add(w.ourName, w.role, w.ourInn);
+        add(w.custName, w.role === C.ROLE.subContractor ? C.ROLE.genContractor : C.ROLE.developer);
+        if (our) P.settings.ourOrg = our.key;
+        touch();
+      }
+      step++; draw();
+      if (step === 3) render();
+    };
+    draw();
   }
 
   // ссылки на организацию по ключу
@@ -711,23 +1051,77 @@
     const tb = document.createElement('div'); tb.className = 'toolbar';
     tb.innerHTML = '<input type="search" placeholder="Поиск…"><button type="button" class="btn btn-primary" data-add>+ Добавить</button>';
     if (opts.noSearch) $('input', tb).remove();
+    if (opts.addLabel) $('[data-add]', tb).textContent = opts.addLabel;
+    // элементы слева от «+ Добавить» (подпись, кнопки), между ними — распорка
+    if (opts.lead) tb.prepend(...opts.lead);
     (opts.tools || []).forEach(t => tb.appendChild(t));
+    // фильтры-«пилюли» с количеством: [[подпись, условие], …]
+    let flt = 0;
+    const fbar = document.createElement('div'); fbar.className = 'filters';
+    const drawFilters = () => {
+      if (!opts.filters) return;
+      const arr = getArr();
+      fbar.innerHTML = '';
+      opts.filters.forEach(([label, fn], i) => {
+        const n = fn ? arr.filter(fn).length : arr.length;
+        if (i && !n && i !== flt) return; // пустые фильтры не показываем
+        const c = document.createElement('button'); c.type = 'button'; c.className = 'chip' + (i === flt ? ' on' : '');
+        c.innerHTML = esc(label) + '<span class="n">' + n + '</span>';
+        c.addEventListener('click', () => { flt = i; draw(); });
+        fbar.appendChild(c);
+      });
+    };
+    // отмеченные строки — панель действий над ними
+    const bulk = document.createElement('div'); bulk.className = 'bulk'; bulk.hidden = true;
+    const drawBulk = () => {
+      if (!opts.check || !opts.bulk) return;
+      const sel = getArr().filter(it => it[opts.check.key]);
+      bulk.hidden = !sel.length; bulk.innerHTML = '';
+      if (!sel.length) return;
+      bulk.insertAdjacentHTML('beforeend', '<b>' + esc(opts.bulkLabel || 'Отмечено') + ': ' + sel.length + '</b><span class="sp"></span>');
+      opts.bulk(sel).forEach(b => bulk.appendChild(b));
+      bulk.appendChild(btn('Снять отметки', () => { sel.forEach(it => { it[opts.check.key] = ''; }); touch(); draw(); opts.onCheck && opts.onCheck(); }, 'btn-sm'));
+    };
+    if (opts.filters) { const s = $('input[type=search]', tb); if (s) { s.classList.add('flt-search'); } tb.prepend(fbar); }
     const list = document.createElement('div'); list.className = 'list';
-    wrap.append(tb, list);
+    wrap.append(tb, bulk, list);
     el.appendChild(wrap);
+    const openRows = new Set(); // строки с раскрытым списком замечаний
     const draw = () => {
       const arr = getArr();
       list.innerHTML = '';
-      const items = arr.filter(it => !q || (sc.search ? sc.search(it) : JSON.stringify(it)).toLowerCase().includes(q));
-      if (!items.length) { list.innerHTML = '<div class="empty">' + (arr.length ? 'Ничего не найдено' : 'Пока пусто. Нажмите «+ Добавить».') + '</div>'; }
+      drawFilters(); drawBulk();
+      const ff = opts.filters && opts.filters[flt] && opts.filters[flt][1];
+      let items = arr.filter(it => (!ff || ff(it)) && (!q || (sc.search ? sc.search(it) : JSON.stringify(it)).toLowerCase().includes(q)));
+      if (opts.order) items = opts.order(items); // порядок показа (например, смета — по разделам договор / ДС)
+      if (!items.length) { list.innerHTML = '<div class="empty">' + (arr.length ? 'Ничего не найдено' : 'Пока пусто. Нажмите «' + esc(opts.addLabel || '+ Добавить') + '».') + '</div>'; }
+      let curSec = null;
       items.forEach(it => {
+        // заголовок раздела перед первой строкой раздела
+        if (opts.section) {
+          const sec = opts.section(it);
+          if (sec && sec !== curSec) { const h = document.createElement('div'); h.className = 'row sec-h'; h.textContent = sec; list.appendChild(h); }
+          curSec = sec;
+        }
         const r = sc.row(it);
-        const row = document.createElement('div'); row.className = 'row' + (r.warn ? ' warn' : '');
+        const compact = !!r.cols; // компактная строка: номер, название, статус; ниже — разбивка столбцами
+        const row = document.createElement('div'); row.className = 'row' + (compact ? ' row-c' : (r.warn ? ' warn' : '')) + (r.cls ? ' ' + r.cls : '') + (openRows.has(it) ? ' open' : '');
         let html = '';
-        if (opts.check) html += '<label class="check" title="' + esc(opts.check.title) + '"><input type="checkbox" data-chk' + (it[opts.check.key] ? ' checked' : '') + '></label>';
-        if (r.num) html += '<div class="num">' + esc(r.num) + '</div>';
-        html += '<div class="row-main"><div class="row-title">' + esc(r.title) + '</div>';
-        if (r.sub) html += '<div class="row-sub">' + esc(r.sub) + '</div>';
+        const chk = opts.check ? '<label class="check" title="' + esc(opts.check.title) + '"><input type="checkbox" data-chk' + (it[opts.check.key] ? ' checked' : '') + '></label>' : '';
+        if (compact) {
+          const iss = r.issues || [];
+          const red = iss.some(x => x.lvl === 'r');
+          const st = iss.length ? '<button type="button" class="st ' + (red ? 'r' : 'w') + '" data-st title="Что не так — нажмите">' + (red ? '● ' : '⚠ ') + iss.length + '</button>' : (r.okLabel === false ? '' : '<span class="st ok">✓ ' + esc(r.okLabel || 'готов') + '</span>');
+          html += '<div class="row-main"><div class="rc-top">' + chk + (r.no ? '<span class="rc-no">' + esc(r.no) + '</span>' : '') + '<span class="rc-nm" title="' + esc(r.title) + '">' + esc(r.title) + '</span>' +
+            (r.tags || []).filter(Boolean).map(t => '<span class="rc-tag ' + (t.c || '') + '">' + esc(t.t) + '</span>').join('') + st + '</div>';
+          html += '<div class="rc-cols' + (r.colsCls ? ' ' + r.colsCls : '') + '">' + r.cols.map(([lb, vl, cls]) => '<div><span class="lb">' + esc(lb) + '</span><span class="vl ' + (cls || '') + '" title="' + esc(vl) + '">' + esc(vl) + '</span></div>').join('') + '</div>';
+          if (iss.length) html += '<div class="rc-iss">' + iss.map((x, i) => '<div class="iss"><span class="d ' + (x.lvl === 'r' ? 'r' : 'w') + '"></span><span class="t">' + esc(x.text) + '</span><button type="button" class="btn btn-sm" data-fix="' + i + '">' + esc(x.fix || 'Исправить') + '</button></div>').join('') + '</div>';
+        } else {
+          html += chk;
+          if (r.num) html += '<div class="num">' + esc(r.num) + '</div>';
+          html += '<div class="row-main"><div class="row-title">' + esc(r.title) + '</div>';
+          if (r.sub) html += '<div class="row-sub">' + esc(r.sub) + '</div>';
+        }
         const b = (r.badges || []).filter(Boolean);
         if (b.length) html += '<div style="margin-top:4px">' + b.map(x => '<span class="badge ' + (x.c || '') + '">' + esc(x.t) + '</span>').join('') + '</div>';
         // пометки с кнопками прямо в строке (например, непринятые изменения из доп. соглашения)
@@ -747,6 +1141,14 @@
             const lab = document.createElement('label'); lab.className = 'inl inl-' + f.t + (f.cls ? ' ' + f.cls : '');
             lab.innerHTML = '<span>' + esc(f.l) + '</span>';
             let input;
+            if (f.t === 'check') {
+              // галочка в строке списка (например, «весь остаток» в смете)
+              // как соседнее поле: подпись сверху, ниже — «поле» той же высоты с галочкой внутри
+              lab.className = 'inl inl-s inl-check';
+              lab.innerHTML = '<span>' + esc(f.l) + '</span><span class="inl-box"><input type="checkbox"' + (it[f.k] ? ' checked' : '') + '></span>';
+              lab.querySelector('input').addEventListener('change', e => { it[f.k] = e.target.checked ? 1 : ''; touch(); opts.onInline && opts.onInline(it, f.k); });
+              box.appendChild(lab); return;
+            }
             if (f.t === 'combo') { const c = comboEl(f, it[f.k]); input = c.input; lab.appendChild(c.box); }
             else {
               input = document.createElement('input');
@@ -766,13 +1168,24 @@
           });
           $('.row-main', row).appendChild(box);
         }
+        // свой блок в строке (например, разбивка позиции сметы с полем «В этой КС»)
+        if (opts.extra) { const x = opts.extra(it); if (x) { x.classList.add('row-extra'); $('.row-main', row).appendChild(x); } }
         row.addEventListener('click', e => {
-          if (e.target.closest('.row-inline')) return;
+          if (e.target.closest('.row-inline, .row-extra')) return;
           const btn = e.target.closest('button');
           if (btn && btn.dataset.note) { const [ni, bi] = btn.dataset.note.split(':').map(Number); r.notes[ni].buttons[bi].onClick(); return; }
           if (e.target.closest('.row-note')) return;
+          // статус: раскрыть / свернуть список замечаний
+          if (btn && btn.dataset.st !== undefined) { openRows.has(it) ? openRows.delete(it) : openRows.add(it); row.classList.toggle('open'); return; }
+          // «Исправить» у замечания: открыть карточку на нужном разделе
+          if (btn && btn.dataset.fix !== undefined) {
+            const x = r.issues[+btn.dataset.fix];
+            if (x.onFix) x.onFix(); else openEditor(schemaKey, getArr(), it, false, () => { draw(); opts.after && opts.after(); }, { focus: x.sec });
+            return;
+          }
+          if (e.target.closest('.rc-iss')) return;
           const chk = e.target.closest('[data-chk]');
-          if (chk) { it[opts.check.key] = chk.checked ? 1 : ''; touch(); opts.onCheck && opts.onCheck(); return; }
+          if (chk) { it[opts.check.key] = chk.checked ? 1 : ''; touch(); drawBulk(); opts.onCheck && opts.onCheck(); return; }
           if (e.target.closest('label.check')) return;
           const arr2 = getArr(); const i = arr2.indexOf(it);
           if (btn && btn.dataset.rb !== undefined) { opts.rowButtons[+btn.dataset.rb].onClick(it); return; }
@@ -815,49 +1228,154 @@
     (children || []).forEach(ch => ch && c.appendChild(ch));
     return c;
   }
+  // вкладки раздела: [[адрес, подпись, число?], …] — каждая вкладка ведёт на свой экран
+  function subTabs(items, active) {
+    const t = document.createElement('div'); t.className = 'subtabs';
+    items.forEach(([href, label, n]) => {
+      const a = document.createElement('a'); a.href = href; a.className = href === active ? 'on' : '';
+      a.innerHTML = esc(label) + (n !== undefined && n !== '' ? ' <span class="n">' + esc(String(n)) + '</span>' : '');
+      t.appendChild(a);
+    });
+    return t;
+  }
   function para(html, cls) { const p = document.createElement('p'); p.className = cls || 'muted small'; p.innerHTML = html; return p; }
 
   const VIEWS = {
+    // ===== обзор объекта: готовность по шагам, что сделать дальше, цифры =====
+    home() {
+      const st = P.settings, today = C.todayISO();
+      const chk = C.projectCheck(P);
+      const actsAll = P.acts.filter(a => a.type);
+      const actBad = a => (a.imported && !a.importDone && C.importIssues(P, a).length) || C.actView(P, a).warnings.length;
+      const badActs = actsAll.filter(actBad);
+      const bal = C.materialBalance(P);
+      const expired = bal.filter(x => C.matExpired(x.m, today) && (x.rest === null || x.rest > 0));
+      const cp = C.contractPriceNow(P), smGross = C.smetaTotals(P).gross;
+      const doneGross = C.vatSplit(P, C.ksDoneBefore(P)).gross;
+      const cand = P.candidates || [];
+      const pw = C.partyWarnings(P);
+      const pdNoRd = chk.filter(x => x.where === '#/rd');
+      // шапка
+      const h = document.createElement('div'); h.className = 'home-hero';
+      h.innerHTML = '<div><h1>' + esc(projTitle(P)) + '</h1><div class="muted">' + esc([st.contractNo ? 'Договор № ' + st.contractNo + (st.contractDate ? ' от ' + C.fmtDate(st.contractDate) : '') : 'договор не заполнен', C.builderOrg(P) ? 'Подрядчик ' + C.builderOrg(P).name : '', C.workDates(P).end ? 'срок до ' + C.fmtDate(C.workDates(P).end) : ''].filter(Boolean).join(' · ')) + '</div></div><div class="sp"></div>';
+      const q = document.createElement('div'); q.className = 'home-quick';
+      q.append(btn('⇪ Загрузить документ', () => { location.hash = '#/import'; }, 'btn-primary'), btn('+ Новый акт', () => { location.hash = '#/acts?new'; }), btn('Текущая КС', () => { location.hash = '#/smeta'; }));
+      h.appendChild(q); main.appendChild(h);
+      // пустой проект — предложить мастер нового объекта
+      if (!st.objectName && !st.contractNo && !P.orgs.length && !P.acts.length) {
+        const wz = document.createElement('div'); wz.className = 'card wz-offer';
+        wz.innerHTML = '<div><b>Новый объект?</b><span class="muted small">Три коротких шага: объект и договор, ваша организация, что загрузить дальше.</span></div>';
+        wz.appendChild(btn('Начать мастер', () => newObjectWizard(), 'btn-primary'));
+        main.appendChild(wz);
+      }
+      // готовность по шагам
+      const step = (n, title, href, cls, text, pct) => '<a class="hstep ' + cls + '" href="' + href + '"><span class="n">' + n + '</span><span class="t">' + esc(title) + '</span><span class="s">' + esc(text) + '</span><span class="bar"><i style="width:' + Math.max(4, Math.min(100, pct)) + '%"></i></span></a>';
+      const contractOk = st.objectName && st.contractNo && st.contractDate;
+      const partiesOk = C.customerOrg(P) && C.builderOrg(P) && P.people.length && !pw.length;
+      const rdCnt = (P.rdSections || []).length;
+      const matCnt = P.materials.filter(m => m.name).length;
+      const okActs = actsAll.length - badActs.length;
+      const ksNo = P.ks.number || '—';
+      const steps = document.createElement('div'); steps.className = 'card home-steps';
+      steps.innerHTML =
+        step(1, 'Договор', '#/settings', contractOk ? 'ok' : 'warn', contractOk ? '✓ ' + ['цена', C.workDates(P).end ? 'сроки' : '', P.supplements.length ? P.supplements.length + ' ДС' : ''].filter(Boolean).join(', ') : '⚠ заполните реквизиты', contractOk ? 100 : 40) +
+        step(2, 'Участники', '#/orgs', partiesOk ? 'ok' : 'warn', (partiesOk ? '✓ ' : '⚠ ') + P.orgs.length + ' орг., ' + P.people.length + ' предст.' + (cand.length ? ' · найдено ' + cand.length : ''), partiesOk ? 100 : 50) +
+        step(3, 'Проект ПД / РД', '#/rd', rdCnt && !pdNoRd.length ? 'ok' : 'warn', rdCnt ? (pdNoRd.length ? '⚠ ' + pdNoRd.length + ' без РД' : '✓ разделов: ' + rdCnt) : '⚠ не загружен', rdCnt ? (pdNoRd.length ? 70 : 100) : 10) +
+        step(4, 'Материалы', '#/materials', expired.length ? 'warn' : (matCnt ? 'ok' : 'todo'), expired.length ? '⚠ истёк документ: ' + expired.length : (matCnt ? '✓ ' + matCnt + ' шт.' : 'пока нет'), matCnt ? (expired.length ? 80 : 100) : 5) +
+        step(5, 'Акты', '#/acts', actsAll.length && !badActs.length ? 'ok' : 'todo', actsAll.length ? okActs + ' из ' + actsAll.length + ' готовы' : 'пока нет', actsAll.length ? okActs / actsAll.length * 100 : 5) +
+        step(6, 'КС', '#/smeta', 'todo', P.smeta.some(r => r.name) ? 'КС № ' + ksNo + (P.ksHistory.length ? ' · закрыто ' + P.ksHistory.length : '') : 'сметы нет', cp.total ? doneGross / cp.total * 100 : 5);
+      main.appendChild(steps);
+      // что сделать дальше — самое важное по порядку
+      const todo = [];
+      expired.slice(0, 2).forEach(x => todo.push(['r', 'Истёк документ о качестве: «' + C.matName(x.m) + '»', 'действовал до ' + C.fmtDate(C.matUntil(x.m)) + ', материал ещё на объекте — загрузите новый документ', '#/materials', 'Исправить']));
+      // (истёкшие документы уже показаны выше — их повтор из проверки акта не берём)
+      chk.filter(x => x.lvl === 'err' && !(expired.length && /истёк документ/i.test(x.text))).slice(0, 3).forEach(x => todo.push(['r', x.text, '', x.where, 'Исправить']));
+      if (badActs.length) todo.push(['y', 'Актов требуют правки: ' + badActs.length, 'откройте «Акты освидетельствования» → фильтр «исправить»', '#/acts', 'Открыть']);
+      pdNoRd.slice(0, 2).forEach(x => todo.push(['y', x.text, '', '#/import', 'Загрузить']));
+      if (cand.length) todo.push(['b', 'Принять из документов: ' + cand.filter(c => c.kind === 'org').length + ' организ., ' + cand.filter(c => c.kind === 'person').length + ' представ.', 'нашлись в загруженных документах, ещё не заведены', cand.some(c => c.kind === 'org') ? '#/orgs' : '#/people', 'Посмотреть']);
+      chk.filter(x => x.lvl === 'warn' && x.where !== '#/rd').slice(0, Math.max(0, 5 - todo.length)).forEach(x => todo.push(['y', x.text, '', x.where, 'Открыть']));
+      const two = document.createElement('div'); two.className = 'home-two';
+      const left = document.createElement('div');
+      left.innerHTML = '<h2 class="home-h">Что сделать дальше</h2>';
+      if (!todo.length) left.appendChild(para('✓ Срочных дел нет. Загрузите следующий документ или оформите новый акт.', 'muted'));
+      todo.slice(0, 6).forEach(([c, t, s, href, b]) => {
+        const r = document.createElement('div'); r.className = 'home-nx';
+        r.innerHTML = '<span class="ic ' + c + '">' + (c === 'r' ? '!' : c === 'y' ? '⚠' : 'i') + '</span><span class="tx"><b>' + esc(t) + '</b>' + (s ? '<span>' + esc(s) + '</span>' : '') + '</span>';
+        r.appendChild(btn(b, () => { location.hash = href; }, 'btn-sm' + (c === 'r' ? ' btn-primary' : '')));
+        left.appendChild(r);
+      });
+      // цифры
+      const right = document.createElement('div');
+      right.innerHTML = '<h2 class="home-h">Объект в цифрах</h2>';
+      const k = document.createElement('div'); k.className = 'kpi';
+      const match = cp.total && smGross ? (Math.abs(cp.total - smGross) < 0.01 ? '<span class="kpi-ok">✓ совпадает со сметой</span>' : '<span class="kpi-warn">≠ смета ' + (smGross > cp.total ? 'больше' : 'меньше') + ' на ' + C.money(Math.abs(smGross - cp.total)) + '</span>') : '';
+      k.innerHTML = '<div><span class="muted small">Цена договора' + (cp.hasDs ? ' с ДС' : '') + '</span><b>' + C.money(cp.total || smGross) + '</b>' + match + '</div>' +
+        '<div><span class="muted small">Выполнено (закрытые КС)</span><b>' + C.money(doneGross) + '</b><span class="muted small">' + (cp.total ? Math.round(doneGross / cp.total * 100) + ' %' : '') + '</span></div>' +
+        '<div><span class="muted small">Актов</span><b>' + actsAll.length + '</b>' + (badActs.length ? '<span class="kpi-warn">' + badActs.length + ' требуют правки</span>' : '') + '</div>' +
+        '<div><span class="muted small">Материалов</span><b>' + matCnt + '</b>' + (expired.length ? '<span class="kpi-warn">истёк документ: ' + expired.length + '</span>' : '') + '</div>';
+      const kc = card(null, [k]); kc.style.padding = '12px'; right.appendChild(kc);
+      // последние акты — быстрый переход
+      const last = actsAll.slice().sort((a, b) => (C.actView(P, b).date || '').localeCompare(C.actView(P, a).date || '')).slice(0, 5);
+      if (last.length) {
+        right.insertAdjacentHTML('beforeend', '<h2 class="home-h" style="margin-top:14px">Последние акты</h2>');
+        const ul = document.createElement('div'); ul.className = 'card home-feed';
+        last.forEach(a => { const v = C.actView(P, a); const r = document.createElement('a'); r.href = '#/acts'; r.innerHTML = '<span class="d">' + esc(C.fmtDate(v.date)) + '</span><span>' + esc(a.type + ' № ' + v.number + ' — ' + v.name) + '</span>'; ul.appendChild(r); });
+        right.appendChild(ul);
+      }
+      two.append(left, right); main.appendChild(two);
+    },
     settings() {
-      main.appendChild(head('Объект и договор', 'Общие данные для всех документов'));
+      main.appendChild(head('Договор и доп. соглашения', '', [btn('⇪ Загрузить договор или ДС', () => { location.hash = '#/import'; })]));
       const st = P.settings;
-      main.appendChild(card('1. Объект и договор', [formGrid(st, [
-        F('shortName', 'Короткое имя проекта', 'text', { hint: 'Для списка проектов: ВИТ, ТурбоТехМаш… В документы не попадает' }),
+      // сводка: цена по договору, изменения по ДС, цена с ДС (сверка со сметой), срок работ
+      const priceBox = document.createElement('div'); priceBox.className = 'kpi';
+      const updPrice = () => {
+        const cp = C.contractPriceNow(P), sm = C.smetaTotals(P).gross, wd = C.workDates(P);
+        const delta = C.round2(cp.total - cp.base);
+        const match = !cp.total || !sm ? '' : Math.abs(cp.total - sm) < 0.01 ? '<span class="kpi-ok">✓ совпадает со сметой</span>' : '<span class="kpi-warn">⚠ смета ' + (sm > cp.total ? 'больше' : 'меньше') + ' на ' + C.money(Math.abs(sm - cp.total)) + '</span>';
+        priceBox.innerHTML = '<div><span class="muted small">Цена по договору</span><b>' + (cp.base ? C.money(cp.base) : '—') + '</b></div>' +
+          (cp.hasDs ? '<div><span class="muted small">Изменения по ДС (' + cp.steps.length + ')</span><b>' + (delta >= 0 ? '+' : '−') + C.money(Math.abs(delta)) + '</b></div>' +
+            '<div><span class="muted small">Цена с учётом ДС</span><b>' + C.money(cp.total) + '</b>' + match + '</div>' : (match ? '<div><span class="muted small">Смета</span><b>' + C.money(sm) + '</b>' + match + '</div>' : '')) +
+          '<div><span class="muted small">Срок работ' + (cp.hasDs ? ' с учётом ДС' : '') + '</span><b>' + esc(wd.start || wd.end ? (C.fmtDate(wd.start) || '…') + ' – ' + (C.fmtDate(wd.end) || '…') : '—') + '</b></div>';
+      };
+      const kc = card(null, [priceBox]); kc.style.padding = '12px'; main.appendChild(kc);
+      updPrice();
+      const tabs = pageTabs([['t1', 'Договор'], ['t2', 'Доп. соглашения' + (P.supplements.length ? ' (' + P.supplements.length + ')' : '')], ['t3', 'Для общего журнала'], ['t4', 'Настройки']], settingsTab, k => { settingsTab = k; });
+      main.appendChild(tabs.bar);
+      Object.values(tabs.panes).forEach(x => main.appendChild(x));
+      tabs.panes.t1.appendChild(card(null, [formGrid(st, [
         F('objectName', 'Наименование объекта (как в проекте)', 'text', { wide: 1 }),
         F('address', 'Адрес объекта', 'textarea', { wide: 1 }),
         F('contractNo', 'Номер договора подряда'), F('contractDate', 'Дата договора', 'date'),
-        F('contractPrice', 'Цена договора, руб. с НДС', 'number', { hint: 'Для КС-2 («договорная стоимость») и проверки: КС не больше цены договора. Пусто — по смете' }),
-        F('projectCode', 'Шифр проекта (общий)', 'text', { hint: 'Используется, если для раздела не задан свой шифр в «Справочник работ → Разделы РД»' }),
-        F('copies', 'Экземпляров акта по умолчанию', 'number'),
-        F('projectDocName', 'Наименование проектной / рабочей документации', 'text', { wide: 1, hint: 'В актах дополняется «разработчик …» по проектировщику' }),
-        F('vat', 'Ставка НДС (0,22 = 22%)', 'number')
+        F('contractPrice', 'Цена договора, руб. с НДС', 'number', { help: 'Для КС-2 («договорная стоимость») и проверки: КС не больше цены договора. Пусто — по смете. Изменения цены по доп. соглашениям — во вкладке «Доп. соглашения».' }),
+        F('projectCode', 'Шифр проекта (общий)', 'text', { help: 'Используется, если у раздела в «Проектной и рабочей документации» нет своего шифра.' })
       ], () => { updateHeader(); updPrice(); })]));
       // дополнительные соглашения: меняют цену, сроки, добавляют или исключают позиции сметы
-      const dsCard = card('2. Дополнительные соглашения', [para('Каждое ДС — отдельной строкой: на сколько меняется цена договора (или новая цена) и сроки. Дополнительные работы добавьте в «Смету» с основанием «ДС № …», исключённые — отметьте «Исключена из договора». ДС можно загрузить файлом через «Загрузку документов».')]);
-      const priceBox = document.createElement('div'); priceBox.className = 'kpi'; priceBox.style.marginBottom = '10px';
-      const updPrice = () => {
-        const cp = C.contractPriceNow(P);
-        priceBox.style.display = cp.hasDs ? '' : 'none';
-        priceBox.innerHTML = '<div><span class="muted small">Цена по договору</span><b>' + C.money(cp.base) + '</b></div>' +
-          cp.steps.map(x => '<div><span class="muted small">ДС № ' + esc(x.ds.no || '—') + '</span><b>' + (x.delta >= 0 ? '+' : '−') + C.money(Math.abs(x.delta)) + '</b></div>').join('') +
-          '<div><span class="muted small">Цена с учётом ДС</span><b>' + C.money(cp.total) + '</b></div>';
-      };
-      dsCard.appendChild(priceBox);
-      main.appendChild(dsCard);
-      collection(dsCard, 'supplements', () => P.supplements, { noSearch: true, after: updPrice });
-      const wd = C.workDates(P);
-      if (P.supplements.some(d => d.startDate || d.endDate)) dsCard.appendChild(para('Сроки работ с учётом ДС: ' + esc((C.fmtDate(wd.start) || '…') + ' – ' + (C.fmtDate(wd.end) || '…'))));
-      main.appendChild(card('Для общего журнала работ', [formGrid(st, [
+      const dsCard = card(null, [para('Каждое ДС — отдельной строкой: на сколько меняется цена договора (или новая цена) и сроки. Дополнительные работы добавьте в «Смету» с основанием «ДС № …», исключённые — отметьте «Исключена из договора». ДС можно загрузить файлом через «Загрузку документов».')]);
+      tabs.panes.t2.appendChild(dsCard);
+      collection(dsCard, 'supplements', () => P.supplements, { noSearch: true, addLabel: '+ Доп. соглашение', after: updPrice });
+      tabs.panes.t4.appendChild(card(null, [formGrid(st, [
+        F('shortName', 'Короткое имя проекта', 'text', { help: 'Для списка проектов и шапки приложения: ВИТ, ТурбоТехМаш… В документы не попадает.' }),
+        F('vat', 'Ставка НДС (0,22 = 22%)', 'number'),
+        F('copies', 'Экземпляров акта по умолчанию', 'number'),
+        F('projectDocName', 'Наименование проектной / рабочей документации', 'text', { wide: 1, help: 'В актах дополняется «разработчик …» по проектировщику.' })
+      ], () => { updateHeader(); updPrice(); })]));
+      tabs.panes.t3.appendChild(card(null, [formGrid(st, [
         F('workKind', 'Вид работ', 'combo', { opts: () => ['строительство', 'реконструкция', 'капитальный ремонт'] }),
-        F('permit', 'Разрешение на строительство', 'textarea', { wide: 1 }),
-        F('expertise', 'Заключение экспертизы', 'textarea', { wide: 1 }),
+        F('permit', 'Разрешение на строительство', 'textarea', { wide: 1, show: o => !o.permitNone }),
+        F('permitNone', 'Разрешение на строительство не требуется (ст. 51 ГрК РФ) — в ОЖР будет «Не требуется»', 'check', { wide: 1, rerender: 1 }),
+        F('expertise', 'Заключение экспертизы', 'textarea', { wide: 1, show: o => !o.expertiseNone }),
+        F('expertiseNone', 'Экспертиза проектной документации не проводится (ст. 49 ГрК РФ) — в ОЖР будет «Не требуется»', 'check', { wide: 1, rerender: 1 }),
         F('startDate', 'Начало работ', 'date'), F('endDate', 'Окончание работ', 'date'),
+        F('posMonths', 'Продолжительность строительства по ПОС, мес.', 'number', { hint: 'Заполняется при загрузке ПОС. Проверка комплекта сверит с ней сроки и даты актов' }),
+        F('posPrep', 'В т. ч. подготовительный период, мес.', 'number'),
         F('objectInfo', 'Краткие характеристики объекта', 'textarea', { wide: 1 })
-      ])]));
+      ], f => { if (f.k === 'permitNone' || f.k === 'expertiseNone') render(); })]));
     },
     orgs() {
       const sc = SCHEMA.orgs;
-      main.appendChild(head(sc.title, sc.intro));
+      main.appendChild(head('Участники строительства', sc.intro));
+      main.appendChild(subTabs([['#/orgs', 'Организации', P.orgs.length], ['#/people', 'Представители', P.people.length]], '#/orgs'));
       // «наша организация» и проверка состава участников
       const top = document.createElement('div');
       main.appendChild(top);
@@ -871,68 +1389,99 @@
           F('ourOrg', 'Наша организация', 'select', { opts: orgKeys, empty: '— не выбрана —', hint: 'От её имени ведётся документация: она подставляется исполнителем в новые акты (если она субподрядчик) и в шапку ЖВК' })
         ], () => { drawTop(); ctl.draw(); }), summary]));
       };
+      const cand = document.createElement('div'); main.appendChild(cand);
       const ctl = collection(main, 'orgs', () => P.orgs, {
         after: () => drawTop(),
         onCopy: cp => { let k = cp.key + ' (копия)', n = 2; while (P.orgs.some(o => o.key === k)) k = cp.key + ' (копия ' + n++ + ')'; cp.key = k; }
       });
+      candidatesPanel(cand, 'org', () => ctl.draw());
     },
     people() {
       const sc = SCHEMA.people;
       const others = Object.values(store.projects).filter(p => p.id !== P.id && p.people.length);
-      main.appendChild(head(sc.title, sc.intro, others.length ? [btn('Взять из другого проекта…', () => peopleFromProject(others, () => ctl.draw()))] : []));
+      main.appendChild(head('Участники строительства', sc.intro, others.length ? [btn('Взять из другого проекта…', () => peopleFromProject(others, () => ctl.draw()))] : []));
+      main.appendChild(subTabs([['#/orgs', 'Организации', P.orgs.length], ['#/people', 'Представители', P.people.length]], '#/people'));
+      const cand = document.createElement('div'); main.appendChild(cand);
       const ctl = collection(main, 'people', () => P.people, { defaults: () => ({}) });
+      candidatesPanel(cand, 'person', () => ctl.draw());
     },
     materials() {
-      listView('materials', P.materials, () => P.materials, {
-        inline: [
-          { k: 'qty', l: 'Кол-во', t: 'number', cls: 'inl-s' },
-          { k: 'unit', l: 'Ед. изм.', t: 'combo', opts: units, cls: 'inl-s' },
-          { k: 'delivery', l: 'УПД / ТН №', t: 'text' },
-          { k: 'deliveryDate', l: 'Дата поставки', t: 'date' }
-        ]
+      const sc = SCHEMA.materials;
+      main.appendChild(head(sc.title, '', [
+        fmtSwitch(),
+        ddBtn('ЖВК / ведомость ▾', [
+          ['Журнал входного контроля (ЖВК)', () => makeDoc('ЖВК', () => IDPdf.jvkDoc(P))],
+          ['Ведомость материалов (остатки)', () => makeDoc('Ведомость материалов', () => IDPdf.balanceDoc(P))]
+        ], 'btn-primary')
+      ]));
+      main.appendChild(subTabs([['#/materials', 'Материалы и документы', P.materials.length], ['#/balance', 'Движение материалов']], '#/materials'));
+      const today = C.todayISO();
+      collection(main, 'materials', () => P.materials, {
+        addLabel: '+ Материал',
+        filters: [['Все', null], ['Документ истёк / истекает', m => C.matExpired(m, today) || matSoon(m)], ['Без документа', m => !C.matDocs(m)], ['Не использованы в актах', m => !P.acts.some(a => (a.materials || []).includes(m.id))]]
       });
     },
     works() {
       const sc = SCHEMA.works;
-      main.appendChild(head(sc.title, sc.intro));
-      // разделы РД: шифр подставляется в п. 2 актов по разделу вида работ / акта
-      const rdCard = card('Проектная и рабочая документация — разделы, шифры, листы', [para('Шифр и наименование раздела попадают в п. 2 актов «Работы выполнены по проектной документации». Акт берёт шифр по своему разделу; если раздел здесь не заведён — общий шифр из «Объекта и договора»' + (P.settings.projectCode ? ' (' + esc(P.settings.projectCode) + ')' : '') + '. Разделы ПД и РД с перечнем листов заводятся сами при загрузке PDF проекта в «Загрузке документов» (по штампам, ведомости рабочих чертежей, составу проекта).')]);
-      main.appendChild(rdCard);
-      let worksCtl;
-      collection(rdCard, 'rdSections', () => P.rdSections, {
+      main.appendChild(head('Справочник видов работ', sc.intro));
+      collection(main, 'works', () => P.works);
+    },
+    // проектная и рабочая документация: разделы, шифры, листы (п. 2 актов)
+    rd() {
+      main.appendChild(head('Проектная и рабочая документация', 'Шифр и наименование раздела попадают в п. 2 актов. Акт берёт шифр по своему разделу; если раздел не заведён — общий шифр из «Договора»' + (P.settings.projectCode ? ' (' + P.settings.projectCode + ')' : '') + '.',
+        [btn('⇪ Загрузить ПД / РД', () => { location.hash = '#/import'; }, 'btn-primary')]));
+      const c = card(null, [para('Разделы ПД и РД с перечнем листов заводятся сами при загрузке PDF проекта (по штампам, ведомости рабочих чертежей, «Составу проектной документации»). Если у раздела есть и ПД, и РД, акт берёт шифр РД.')]);
+      main.appendChild(c);
+      collection(c, 'rdSections', () => P.rdSections, {
         noSearch: true,
-        after: () => {
-          // новый раздел — сразу в список разделов, чтобы выбирался в видах работ и актах
-          P.rdSections.forEach(r => { if (r.section && !P.lists.sections.includes(r.section)) P.lists.sections.push(r.section); });
-          if (worksCtl) worksCtl.draw();
-        }
+        // новый раздел — сразу в список разделов, чтобы выбирался в видах работ и актах
+        after: () => { P.rdSections.forEach(r => { if (r.section && !P.lists.sections.includes(r.section)) P.lists.sections.push(r.section); }); updateNavCounts(); }
       });
-      worksCtl = collection(main, 'works', () => P.works);
+    },
+    // исполнительные схемы — отдельным разделом (в карточке акта отмечаются галочками)
+    schemes() {
+      main.appendChild(head('Исполнительные схемы', 'Схемы отмечаются в карточке акта галочками и попадают в п. 4 АОСР (п. 5а АООК), если там ничего не вписано вручную. При загрузке чужой ИД схемы из реестра заводятся сюда сами.'));
+      collection(main, 'schemes', () => P.schemes, { noSearch: P.schemes.length < 8 });
     },
     acts() {
-      const cntEl = document.createElement('span'); cntEl.className = 'muted small';
-      const updCnt = () => { const n = P.acts.filter(a => a.print).length; cntEl.textContent = n ? 'Отмечено к печати: ' + n : ''; };
-      main.appendChild(head('Журнал актов', 'Одна запись = один акт. Номер считается сам по типу и разделу (КЖ-01, КЖ-02…).', [
-        btn('Отметить все', () => { const all = P.acts.every(a => a.print); P.acts.forEach(a => a.print = all ? '' : 1); touch(); ctl.draw(); }),
-        btn('Уведомление по отмеченным', () => { const l = P.acts.filter(a => a.print && a.type); if (!l.length) toast('Отметьте акты галочкой «Печать»'); else makeNotice(l); }),
-        btn('Выгрузить отмеченные…', () => batchActs(), 'btn-primary'), fmtSwitch()
+      const marked = () => P.acts.filter(a => a.print && a.type);
+      main.appendChild(head('Акты освидетельствования', '', [
+        fmtSwitch(),
+        ddBtn('Сформировать ▾', () => [
+          ['Отмеченные акты' + (marked().length ? ' (' + marked().length + ')' : ' — все') + '…', () => batchActs()],
+          ['Уведомление о вызове по отмеченным', () => { const l = marked(); if (!l.length) toast('Отметьте акты галочкой слева'); else makeNotice(l); }],
+          ['Реестр ИД', () => makeDoc('Реестр ИД', () => IDPdf.registryDoc(P))]
+        ], 'btn-primary')
       ]));
-      main.appendChild(cntEl);
+      const impActs = P.acts.filter(a => a.imported && !a.importDone);
       const rem = reminders(); if (rem) main.appendChild(rem);
-      const fit = document.createElement('label'); fit.className = 'check small';
+      // настройки печати — свёрнуто, чтобы не мешали списку
+      const opt = document.createElement('details'); opt.className = 'opts small';
+      opt.innerHTML = '<summary>Настройки печати актов</summary>';
+      const fit = document.createElement('label'); fit.className = 'check small'; fit.style.display = 'flex';
       fit.innerHTML = '<input type="checkbox"' + (P.settings.fitActs !== false ? ' checked' : '') + '> Умещать акт на один лист, если он чуть-чуть не помещается (шрифт уменьшится, но не меньше 78 %)';
       fit.querySelector('input').addEventListener('change', e => { P.settings.fitActs = e.target.checked; touch(); });
-      main.appendChild(fit);
-      const reg = document.createElement('label'); reg.className = 'check small'; reg.style.display = 'block';
+      const reg = document.createElement('label'); reg.className = 'check small'; reg.style.display = 'flex';
       reg.innerHTML = '<input type="checkbox"' + (P.settings.matRegistry !== false ? ' checked' : '') + '> Больше 5 документов о качестве — в п. 3 АОСР (п. 4 АООК) ссылка на реестр, реестр — отдельным листом приложения к акту';
       reg.querySelector('input').addEventListener('change', e => { P.settings.matRegistry = e.target.checked; touch(); });
-      main.appendChild(reg);
+      opt.append(fit, reg);
+      main.appendChild(opt);
+      const bad = a => actIssues(a).length > 0;
       const ctl = collection(main, 'acts', () => P.acts, {
-        check: { key: 'print', title: 'Печать' },
-        onCheck: updCnt, after: updCnt,
+        addLabel: '+ Новый акт',
+        check: { key: 'print', title: 'Отметить — для печати, уведомления, общей правки' },
+        bulkLabel: 'Отмечено',
+        bulk: sel => {
+          const imp = sel.filter(a => a.imported && !a.importDone);
+          return [btn('Выгрузить…', () => batchActs(), 'btn-sm btn-primary'), btn('Уведомление', () => makeNotice(sel.filter(a => a.type)), 'btn-sm')]
+            .concat(imp.length ? [btn('Исправить сразу (' + imp.length + ')…', () => batchFixImported(imp, () => render()), 'btn-sm')] : []);
+        },
+        filters: [['Все', null], ['Требуют правки', bad], ['Готовы', a => !bad(a)], ['Чужая ИД', a => !!a.imported], ['Отмечены', a => !!a.print]],
+        tools: [btn('Отметить все', () => { const all = P.acts.every(a => a.print); P.acts.forEach(a => a.print = all ? '' : 1); touch(); ctl.draw(); })]
+          .concat(impActs.length ? [btn('Чужие акты — исправить сразу (' + impActs.length + ')…', () => batchFixImported(impActs, () => render()))] : []),
         rowButtons: [{ icon: '&#128462;', title: 'PDF этого акта', onClick: a => makeAct(a) },
           { icon: '&#9993;', title: 'Уведомление о вызове на освидетельствование по этому акту', onClick: a => makeNotice([a]) },
-          { icon: '&#10549;', title: 'Следующий акт: копия, даты — сразу после этого акта', onClick: a => nextAct(a) }],
+          { icon: '&#10549;', title: 'Следующий акт: копия, даты — сразу после этого акта', onClick: a => nextAct(a, () => ctl.draw()) }],
         onCopy: cp => { cp.manualNo = ''; cp.print = ''; cp.printedNo = ''; },
         defaults: () => {
           const last = P.acts[P.acts.length - 1];
@@ -943,46 +1492,43 @@
           return d;
         }
       });
-      // «следующий захватка / этап»: те же поля, даты — сразу после этого акта, такой же длительности
-      function nextAct(a) {
-        const iso = d => d.getFullYear() + '-' + C.pad2(d.getMonth() + 1) + '-' + C.pad2(d.getDate());
-        const s0 = C.parseDate(a.start), e0 = C.parseDate(a.end);
-        const cp = JSON.parse(JSON.stringify(a));
-        Object.assign(cp, { id: C.uid(), manualNo: '', print: '', printedNo: '', actDate: '', matQty: {}, sheetsCount: '', note: '' });
-        if (e0) {
-          const days = s0 ? Math.round((e0 - s0) / 864e5) : 0;
-          const ns = new Date(e0); ns.setDate(ns.getDate() + 1);
-          const ne = new Date(ns); ne.setDate(ne.getDate() + days);
-          cp.start = iso(ns); cp.end = iso(ne);
-        }
-        P.acts.splice(P.acts.indexOf(a) + 1, 0, cp);
-        touch(); ctl.draw();
-        openEditor('acts', P.acts, cp, false, () => ctl.draw());
-        toast('Создан следующий акт — проверьте оси, листы и материалы');
-      }
+      // «+ Новый акт» с главной страницы: сразу открыть карточку нового акта
+      if (/[?&]new\b/.test(location.hash)) { history.replaceState(null, '', '#/acts'); setTimeout(() => { const b = main.querySelector('[data-add]'); if (b) b.click(); }, 0); }
     },
     smeta() {
-      main.appendChild(head('Смета, КС-2, КС-3', C.vatTop(P) ? 'Цены — без НДС; НДС начисляется сверху (переключатель — в «Реквизитах КС-2 / КС-3»).' : 'Цены — с НДС, как в договоре; НДС выделяется «в т.ч.» (переключатель — в «Реквизитах КС-2 / КС-3»).', [
-        btn('Смета', () => makeDoc('Смета', () => IDPdf.smetaDoc(P))),
-        btn('КС-2', () => makeDoc('КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P))),
-        btn('КС-3', () => makeDoc('КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P))),
-        btn('Все три (ZIP)', () => makeZip('КС', [['Смета', () => IDPdf.smetaDoc(P)], ['КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P)], ['КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P)]]), 'btn-primary'),
-        fmtSwitch()
+      const ksName = k => k + ' № ' + (P.ks.number || '—');
+      main.appendChild(head('Смета, КС-2, КС-3', '', [
+        fmtSwitch(),
+        ddBtn('Сформировать ▾', () => [
+          ['Смета', () => makeDoc('Смета', () => IDPdf.smetaDoc(P))],
+          [esc(ksName('КС-2')), () => makeDoc('КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P))],
+          [esc(ksName('КС-3')), () => makeDoc('КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P))],
+          ['<b>Все три (ZIP)</b>', () => makeZip('КС', [['Смета', () => IDPdf.smetaDoc(P)], ['КС-2 № ' + P.ks.number, () => IDPdf.ks2Doc(P)], ['КС-3 № ' + P.ks.number, () => IDPdf.ks3Doc(P)]])]
+        ], 'btn-primary')
       ]));
+      // ===== сводка: плашки =====
       const kpi = document.createElement('div'); kpi.className = 'kpi';
+      const tile = (label, val, note) => '<div><span class="muted small">' + label + '</span><b>' + val + '</b>' + (note || '') + '</div>';
       const updKpi = () => {
         // все суммы в сводке — с НДС (цена договора тоже с НДС)
         const t = C.smetaTotals(P), k = C.ksTotals(P), before = C.vatSplit(P, C.ksDoneBefore(P)).gross;
-        const price = C.contractPriceNow(P).total || C.smetaTotals(P, !!P.ks.worksOnly).gross;
-        kpi.innerHTML = '<div><span class="muted small">Смета с НДС' + (t.top ? ' (без НДС ' + C.money(t.net) + ')' : '') + '</span><b>' + C.money(t.gross) + '</b></div>' +
-          '<div><span class="muted small">в т.ч. НДС ' + t.vatPct + '%</span><b>' + C.money(t.vatSum) + '</b></div>' +
-          '<div><span class="muted small">КС № ' + esc(P.ks.number || '—') + (C.ksPeriodMode(P) ? ' (объёмы за период)' : ' (вся смета)') + ', с НДС</span><b>' + C.money(k.gross) + '</b></div>' +
-          (P.ksHistory.length ? '<div><span class="muted small">Закрыто КС: ' + P.ksHistory.length + '</span><b>' + C.money(before) + '</b></div>' +
-            '<div><span class="muted small">Остаток по договору</span><b>' + C.money(price - before - k.gross) + '</b></div>' : '');
+        const cp = C.contractPriceNow(P), price = cp.total, diff = C.round2(price - t.gross);
+        const match = !price ? '<span class="kpi-warn">не указана — <a href="#/settings">указать</a>; остаток считается от сметы</span>'
+          : Math.abs(diff) < 0.01 ? '<span class="kpi-ok">✓ совпадает со сметой</span>'
+            : '<span class="kpi-warn">⚠ смета ' + (diff > 0 ? 'меньше' : 'больше') + ' на ' + C.money(Math.abs(diff)) + '</span>';
+        kpi.innerHTML = tile('Цена договора' + (cp.hasDs ? ' с учётом ДС' : ''), price ? C.money(price) : '—', match) +
+          tile('Смета с НДС' + (t.top ? ' (без НДС ' + C.money(t.net) + ')' : ''), C.money(t.gross)) +
+          tile((t.top ? 'НДС ' : 'в т.ч. НДС ') + t.vatPct + '%', C.money(t.vatSum)) +
+          tile(esc(ksName('КС')) + (C.ksPeriodMode(P) ? ' (объёмы за период)' : ' (вся смета)') + ', с НДС', C.money(k.gross)) +
+          (P.ksHistory.length ? tile('Закрыто КС: ' + P.ksHistory.length, C.money(before)) : '') +
+          tile('Остаток по договору', C.money((price || t.gross) - before - k.gross));
       };
       main.appendChild(card(null, [kpi]));
-      const c = card('Позиции сметы', [para('Поле «В этой КС» — объём, выполненный за текущий отчётный период. Если оно заполнено хотя бы у одной позиции, КС-2 и КС-3 формируются только по таким позициям и на эти объёмы. Если везде пусто — на всю смету.')]);
-      main.appendChild(c);
+      // ===== вкладки =====
+      const tabs = pageTabs([['t1', 'Смета и текущая КС'], ['t2', 'История КС' + (P.ksHistory.length ? ' (' + P.ksHistory.length + ')' : '')], ['t3', 'Настройки КС']], smetaTab, k => { smetaTab = k; });
+      main.appendChild(tabs.bar);
+      Object.values(tabs.panes).forEach(x => main.appendChild(x));
+      const c = tabs.panes.t1;
       // все непринятые изменения из ДС — одной кнопкой
       const pendBar = document.createElement('div'); c.appendChild(pendBar);
       const drawPend = () => {
@@ -999,9 +1545,86 @@
         }), 'btn-sm'));
         pendBar.appendChild(box);
       };
+      // остаток позиции: по смете минус закрытые КС
+      const restOf = x => Math.max(0, Math.round((C.num(x.qty) - C.qtyDoneBefore(P, x.id)) * 1e6) / 1e6);
+      const hasNow = x => x.qtyNow !== undefined && x.qtyNow !== null && String(x.qtyNow) !== '';
+      const isExcl = x => !!(x.excludedBy && C.dsById(P, x.excludedBy));
+      // над списком: номер и период КС, подсказка, кнопки «всё во все» / «очистить»
+      const ksLbl = document.createElement('div'); ksLbl.className = 'ks-lbl';
+      const drawKsLbl = () => {
+        const k = P.ks;
+        ksLbl.innerHTML = '<b>' + esc(ksName('КС')) + '</b> <span class="muted small">' + (k.periodFrom || k.periodTo ? 'за период ' + esc(C.fmtDate(k.periodFrom) || '…') + ' – ' + esc(C.fmtDate(k.periodTo) || '…') : 'период не указан — «Настройки КС»') + '</span>';
+        ksLbl.appendChild(helpTip('В поле «В этой КС» вписывайте объём, выполненный за этот отчётный период: КС-2 и КС-3 соберутся только по заполненным позициям. Если везде пусто — на всю смету. «всё» (или нажатие на число в «Осталось») — весь остаток позиции. ' +
+          (C.vatTop(P) ? 'Цены в смете — без НДС, НДС начисляется сверху.' : 'Цены в смете — с НДС, как в договоре.') + ' Переключить — во вкладке «Настройки КС».'));
+      };
+      const sp = document.createElement('div'); sp.style.flex = '1';
+      const allBtn = btn('Всё во все позиции', () => {
+        const rows = C.smetaOrdered(P).filter(x => restOf(x) > 0);
+        if (!rows.length) { toast('Остатков нет — вся смета уже закрыта по КС'); return; }
+        undoable('В эту КС — весь остаток по ' + rows.length + ' поз.', () => { rows.forEach(x => { x.allNow = 1; x.qtyNow = restOf(x); }); touch(); smetaCtl.draw(); });
+      }, 'btn-sm');
+      allBtn.title = 'В эту КС сразу весь невыполненный объём сметы (например, последняя КС по объекту)';
+      const clrBtn = btn('Очистить', () => {
+        const rows = P.smeta.filter(hasNow);
+        if (!rows.length) { toast('Поля «В этой КС» и так пустые'); return; }
+        undoable('«В этой КС» очищено у ' + rows.length + ' поз.', () => { rows.forEach(x => { x.qtyNow = ''; x.allNow = ''; }); touch(); smetaCtl.draw(); });
+      }, 'btn-sm');
+      // итоги текущей КС — справа, как в КС-3
+      const ksTotal = document.createElement('div'); ksTotal.className = 'ks-total';
+      const drawKsTotal = () => {
+        const k = C.ksTotals(P), pm = C.ksPeriodMode(P);
+        ksTotal.innerHTML = (pm ? '' : '<p class="muted small">Объёмы «В этой КС» не заполнены — КС-2 и КС-3 будут на всю смету.</p>') +
+          '<table><tr><td>Итого по ' + esc(ksName('КС')) + ' (без НДС)</td><td class="v">' + C.money(k.net) + '</td></tr>' +
+          '<tr><td>Сумма НДС ' + k.vatPct + '%</td><td class="v">' + C.money(k.vatSum) + '</td></tr>' +
+          '<tr><td>Всего с учетом НДС</td><td class="v">' + C.money(k.gross) + '</td></tr></table>';
+      };
+      const updAll = () => { updKpi(); drawKsLbl(); drawKsTotal(); };
+      // разбивка позиции: По смете / Было ранее / Осталось / В этой КС / Сумма
+      const posGrid = r => {
+        if (!r.name || isExcl(r)) return null;
+        const before = C.qtyDoneBefore(P, r.id), rest = restOf(r);
+        const g = document.createElement('div'); g.className = 'grid5';
+        const cell = (lb, html, cls) => '<div class="' + (cls || '') + '"><span class="lb">' + lb + '</span>' + html + '</div>';
+        g.innerHTML = cell('По смете', '<span class="vl">' + esc(C.qty(r.qty) + ' ' + (r.unit || '')) + '</span>') +
+          cell('Было ранее', '<span class="vl' + (before ? '' : ' dim') + '">' + (before ? esc(C.qty(before)) : '—') + '</span>') +
+          cell('Осталось', '<span class="vl ' + (rest ? 'acc' : 'dim') + '"' + (rest ? ' title="Весь остаток — в эту КС" data-rest' : '') + '>' + (rest ? esc(C.qty(rest)) : '0') + '</span>') +
+          cell('В этой КС', rest || hasNow(r) ? '<span class="inrow"><input type="text" inputmode="decimal"><button type="button" class="all-btn" title="Весь остаток позиции — в эту КС"></button></span>' : '<span class="vl dim">выполнено</span>', 'c4') +
+          cell('<span class="r">Сумма, руб.</span>', '<span class="vl sum"></span>', 'c5');
+        const inp = $('input', g), ab = $('.all-btn', g), sumEl = $('.vl.sum', g);
+        const upd = () => {
+          const v = C.num(r.qtyNow), on = hasNow(r) && rest > 0 && Math.abs(v - rest) < 1e-9;
+          if (ab) { ab.classList.toggle('on', on); ab.textContent = on ? '✓ всё' : 'всё'; ab.hidden = !rest; }
+          if (inp) { inp.classList.toggle('bad', hasNow(r) && v > rest + 1e-9); inp.title = hasNow(r) && v > rest + 1e-9 ? 'Больше остатка по смете (' + C.qty(rest) + ')' : ''; }
+          const it = C.ksPeriodMode(P) && hasNow(r) ? C.ksItems(P).find(x => x.r === r) : null;
+          sumEl.textContent = it ? C.money(it.c.total) : '—'; sumEl.classList.toggle('dim', !it);
+        };
+        const show = v => String(v).replace('.', ','); // десятичная запятая, как в остальных полях
+        const set = v => { r.qtyNow = v; r.allNow = v !== '' && rest > 0 && Math.abs(C.num(v) - rest) < 1e-9 ? 1 : ''; touch(); if (inp) inp.value = show(v); upd(); updAll(); };
+        if (inp) {
+          inp.value = hasNow(r) ? show(r.qtyNow) : ''; inp.placeholder = rest ? C.qty(rest) : '';
+          inp.addEventListener('change', () => {
+            let v = inp.value.trim();
+            if (v !== '') { const n = +v.replace(/\s/g, '').replace(',', '.'); if (!isFinite(n)) { toast('Введите число'); inp.value = hasNow(r) ? r.qtyNow : ''; return; } v = n; }
+            set(v);
+          });
+          inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+        }
+        if (ab) ab.addEventListener('click', () => set(ab.classList.contains('on') ? '' : rest));
+        const rv = $('[data-rest]', g); if (rv && inp) rv.addEventListener('click', () => set(rest));
+        upd();
+        return g;
+      };
+      // показ по разделам: договор, затем каждое ДС (как в печатной смете)
+      const grpIdx = x => C.dsList(P).findIndex(d => d.id === x.dsId) + 1;
       const smetaCtl = collection(c, 'smeta', () => P.smeta, {
-        noSearch: true, after: updKpi,
-        inline: [{ k: 'qtyNow', l: 'В этой КС', t: 'number', cls: 'inl-s' }],
+        noSearch: true, addLabel: '+ Позиция', lead: [ksLbl, sp, allBtn, clrBtn], after: updAll,
+        order: items => items.map((x, i) => [x, i]).sort((a, b) => grpIdx(a[0]) - grpIdx(b[0]) || a[1] - b[1]).map(x => x[0]),
+        section: x => {
+          if (!C.dsList(P).length) return '';
+          const d = C.dsById(P, x.dsId), st = P.settings;
+          return d ? 'Дополнительные работы по ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : '') : 'Работы по договору № ' + (st.contractNo || '—') + (st.contractDate ? ' от ' + C.fmtDate(st.contractDate) : '');
+        },
+        extra: posGrid,
         // отменить последнее изменение позиции по ДС — вернуть прежние количество и цены
         rowButtons: [{ icon: '&#9998;', title: 'Изменить позицию по доп. соглашению (количество, цены или исключить)', show: r => P.supplements.length > 0 && !(r.dsId && C.dsById(P, r.dsId)) && !r.excludedBy, onClick: r => changeByDs(r) }, { icon: '&#8630;', title: 'Отменить изменение по доп. соглашению', show: r => (r.changes || []).length > 0 || !!r.excludedBy, onClick: r => {
           // исключённую сначала возвращаем в договор
@@ -1015,10 +1638,10 @@
             Object.assign(r, ch.from); r.changes.pop(); if (!r.changes.length) delete r.changes;
             touch(); smetaCtl.draw();
           });
-        } }],
-        onInline: () => { updKpi(); smetaCtl && smetaCtl.draw(); }
+        } }]
       });
-      smetaRedraw = () => { smetaCtl.draw(); updKpi(); drawPend(); };
+      c.appendChild(ksTotal);
+      smetaRedraw = () => { smetaCtl.draw(); drawPend(); };
       drawPend();
       // ручное изменение позиции договора по ДС: запоминается «было → стало», как при загрузке ДС
       const changeByDs = r => {
@@ -1058,19 +1681,20 @@
         }]);
       };
       // история КС: закрыть текущую и начать следующую
-      const hist = card('КС по объекту', []);
-      main.appendChild(hist);
+      const hist = tabs.panes.t2;
       const drawHist = () => {
-        hist.querySelectorAll(':scope > :not(h2)').forEach(x => x.remove());
+        hist.innerHTML = '';
         if (P.ksHistory.length) {
-          const t = document.createElement('table'); t.className = 't small';
-          t.innerHTML = '<tr><th>№</th><th>Дата</th><th>Период</th><th style="text-align:right">Сумма, руб.</th></tr>' + P.ksHistory.map(h =>
-            '<tr><td>' + esc(h.number) + '</td><td>' + esc(C.fmtDate(h.date)) + '</td><td>' + esc(C.fmtDate(h.periodFrom) + ' – ' + C.fmtDate(h.periodTo)) + '</td><td style="text-align:right">' + C.money(h.total) + '</td></tr>').join('');
+          const t = document.createElement('table'); t.className = 't';
+          t.innerHTML = '<tr><th>№ КС</th><th>Дата</th><th>Период</th><th class="r">Сумма, руб.</th><th></th></tr>' + P.ksHistory.map((h, i) =>
+            '<tr><td>' + esc(h.number) + '</td><td>' + esc(C.fmtDate(h.date)) + '</td><td>' + esc(C.fmtDate(h.periodFrom) + ' – ' + C.fmtDate(h.periodTo)) + '</td><td class="r">' + C.money(h.total) + '</td>' +
+            '<td class="r">' + (i === P.ksHistory.length - 1 ? '<button type="button" class="btn btn-sm" data-reopen title="Её объёмы снова встанут в поля «В этой КС»">Вернуть в работу</button>' : '') + '</td></tr>').join('');
           const w = document.createElement('div'); w.className = 'table-wrap'; w.appendChild(t); hist.appendChild(w);
-        } else hist.appendChild(para('Закрытых КС пока нет. Когда КС подписана — закройте её: объёмы запомнятся, номер увеличится, а в КС-3 «с начала работ» и «с начала года» пойдёт нарастающий итог.'));
-        const tb = document.createElement('div'); tb.className = 'toolbar'; tb.style.marginTop = '10px';
-        tb.appendChild(btn('Закрыть КС № ' + (P.ks.number || '—') + ' и начать следующую', closeKs, 'btn-primary'));
-        if (P.ksHistory.length) tb.appendChild(btn('Вернуть последнюю закрытую', reopenKs));
+          $('[data-reopen]', t).addEventListener('click', reopenKs);
+        } else hist.appendChild(card(null, [para('Закрытых КС пока нет. Когда КС подписана — закройте её: объёмы запомнятся, номер увеличится, а в КС-3 «с начала работ» и «с начала года» пойдёт нарастающий итог.')]));
+        const tb = document.createElement('div'); tb.className = 'toolbar'; tb.style.marginTop = '12px';
+        const sp2 = document.createElement('div'); sp2.style.flex = '1';
+        tb.append(sp2, btn('Закрыть КС № ' + (P.ks.number || '—') + ' и начать следующую', closeKs, 'btn-primary'));
         hist.appendChild(tb);
       };
       const closeKs = () => {
@@ -1086,7 +1710,7 @@
           const next = C.parseDate(P.ks.periodTo); if (next) next.setDate(next.getDate() + 1);
           const isoLocal = d => d.getFullYear() + '-' + C.pad2(d.getMonth() + 1) + '-' + C.pad2(d.getDate());
           Object.assign(P.ks, { number: String((parseInt(P.ks.number, 10) || 0) + 1), date: '', periodFrom: next ? isoLocal(next) : '', periodTo: '' });
-          P.smeta.forEach(r => { r.qtyNow = ''; });
+          P.smeta.forEach(r => { r.qtyNow = ''; r.allNow = ''; });
           touch(); render(); toast('КС закрыта');
         });
       };
@@ -1101,33 +1725,60 @@
       };
       drawHist();
       if (P.ks.fitOnePage === undefined) P.ks.fitOnePage = true; // по умолчанию включено
-      main.appendChild(card('Реквизиты КС-2 / КС-3', [formGrid(P.ks, [
-        F('vatMode', 'НДС в смете и КС', 'select', { wide: 1, rerender: 1, opts: [{ v: 'top', l: 'Цены без НДС — НДС сверху: «Итого (без НДС)», «НДС», «Всего с НДС»' }], empty: 'Цены с НДС, как в договоре — «Итого» и «в т.ч. НДС» (по умолчанию)', hint: 'КС-3 по бланку всегда: «Итого» (без НДС), «Сумма НДС», «Всего с учетом НДС»' }),
-        F('ks2Style', 'Расчёт в КС-2', 'select', { wide: 1, opts: [{ v: 'smeta', l: 'Как в смете — в ценах сметы, итоги по настройке НДС выше' }], empty: 'Как в КС-3 — цена и стоимость без НДС; «Итого», «Сумма НДС», «Всего с учетом НДС» (по умолчанию)', hint: 'Как в КС-3: суммы КС-2 и КС-3 совпадают до копейки' }),
-        F('worksOnly', 'КС-2 и КС-3 только на работы (стоимость материалов не включать)', 'check', { wide: 1 }),
-        F('fitOnePage', 'Умещать смету, КС-2 и КС-3 на один лист, если они чуть-чуть не помещаются (шрифт уменьшится, но не меньше 78 %)', 'check', { wide: 1 }),
-        F('customerKey', 'Заказчик по КС (Заказчик / Генподрядчик)', 'select', { opts: orgKeys, empty: 'По ролям: ' + ((C.customerOrg(P) || {}).key || 'застройщик не заведён'), hint: 'Если вы субподрядчик — выберите генподрядчика' }),
-        F('contractorKey', 'Подрядчик по КС (Подрядчик / Субподрядчик)', 'select', { opts: orgKeys, empty: 'По ролям: ' + ((C.builderOrg(P) || {}).key || 'подрядчик не заведён'), hint: 'Если вы субподрядчик — выберите свою организацию' }),
-        F('number', 'Номер КС-2 / КС-3'), F('date', 'Дата составления', 'date'),
-        F('periodFrom', 'Отчётный период с', 'date'), F('periodTo', 'Отчётный период по', 'date'),
-        F('opType', 'Вид операции (код)'), F('pricesAt', 'Смета составлена в ценах на'),
-        F('term', 'Срок выполнения работ (для сметы)', 'textarea', { wide: 1 }),
-        ...(P.supplements.length ? [
-          F('dsMode', 'КС при доп. соглашениях', 'select', { wide: 1, opts: [{ v: 'sep', l: 'Отдельная КС на договор и на каждое ДС — в шапке «№ договора (ДС № … от …)»' }], empty: 'Одна КС: работы по договору и по ДС разделами, в КС-3 — отдельные этапы (по умолчанию)' }),
-          F('dsScope', 'Эта КС оформляется по', 'select', { wide: 1, show: () => P.ks.dsMode === 'sep', opts: dsOpts, empty: 'Основному договору' })
-        ] : []),
-        F('ks3Mode', 'Строки КС-3', 'select', { opts: [{ v: 'items', l: 'По позициям сметы — как в КС-2' }], empty: 'Одной строкой — этап / «Работы по договору №…»' }),
-        F('stageName', 'Наименование этапа для КС-3 (если одной строкой)', 'textarea', { wide: 1, hint: 'Пусто — «Работы по договору № …»' }),
-        F('contractorSignerPos', 'Подписант Подрядчика: должность'), F('contractorSignerName', 'Подписант Подрядчика: Фамилия И.О.'),
-        F('customerSignerPos', 'Подписант Заказчика: должность'), F('customerSignerName', 'Подписант Заказчика: Фамилия И.О.')
-      ], f => { if (f.k === 'vatMode' || f.k === 'dsMode') render(); else updKpi(); })]));
+      // ===== настройки КС: карточки по смыслу =====
+      const onSet = f => {
+        if (f.k === 'vatMode' || f.k === 'dsMode' || f.k === 'dsScope' || f.k === 'worksOnly' || f.k === 'ks3Mode') { render(); return; }
+        updAll(); if (f.k === 'number') drawHist();
+      };
+      // короткие поля — по два в строку, длинные списки — в одну колонку
+      const setCard = (title, fields, one) => { const g = formGrid(P.ks, fields, onSet); if (one) g.classList.add('one'); return card(title, [g]); };
+      const sg = document.createElement('div'); sg.className = 'set-grid';
+      sg.append(
+        setCard('Реквизиты КС', [
+          F('number', 'Номер КС-2 / КС-3'), F('date', 'Дата составления', 'date'),
+          F('periodFrom', 'Отчётный период с', 'date'), F('periodTo', 'Отчётный период по', 'date'),
+          F('opType', 'Вид операции (код)'), F('pricesAt', 'Смета составлена в ценах на'),
+          F('term', 'Срок выполнения работ (для сметы)', 'textarea', { wide: 1 })
+        ]),
+        setCard('Подписанты', [
+          F('contractorSignerPos', 'Подрядчик: должность'), F('contractorSignerName', 'Подрядчик: Фамилия И.О.'),
+          F('customerSignerPos', 'Заказчик: должность'), F('customerSignerName', 'Заказчик: Фамилия И.О.')
+        ]),
+        setCard('Расчёт', [
+          F('vatMode', 'НДС в смете и КС', 'select', { opts: [{ v: 'top', l: 'Цены без НДС — НДС сверху' }], empty: 'Цены с НДС, как в договоре — «в т.ч. НДС» (по умолчанию)', hint: 'КС-3 по бланку всегда: «Итого» (без НДС), «Сумма НДС», «Всего с учетом НДС»' }),
+          F('ks2Style', 'Расчёт в КС-2', 'select', { opts: [{ v: 'smeta', l: 'Как в смете — в ценах сметы' }], empty: 'Как в КС-3 — без НДС, суммы совпадают до копейки (по умолчанию)' }),
+          ...(P.supplements.length ? [
+            F('dsMode', 'КС при доп. соглашениях', 'select', { opts: [{ v: 'sep', l: 'Отдельная КС на договор и на каждое ДС' }], empty: 'Одна КС, работы по ДС — разделами (по умолчанию)', hint: 'Отдельная — в шапке «№ договора, ДС № … от …»' }),
+            F('dsScope', 'Эта КС оформляется по', 'select', { show: () => P.ks.dsMode === 'sep', opts: dsOpts, empty: 'Основному договору' })
+          ] : []),
+          F('ks3Mode', 'Строки КС-3', 'select', { opts: [{ v: 'items', l: 'По позициям сметы — как в КС-2' }], empty: 'Одной строкой — этап / «Работы по договору №…»' }),
+          F('stageName', 'Наименование этапа для КС-3 (если одной строкой)', 'textarea', { show: () => P.ks.ks3Mode !== 'items', hint: 'Пусто — «Работы по договору № …»' }),
+          F('worksOnly', 'КС-2 и КС-3 только на работы (стоимость материалов не включать)', 'check'),
+          F('fitOnePage', 'Умещать смету, КС-2 и КС-3 на один лист, если чуть-чуть не помещаются (шрифт — не меньше 78 %)', 'check')
+        ], true),
+        setCard('Стороны в КС', [
+          F('customerKey', 'Заказчик (Заказчик / Генподрядчик)', 'select', { opts: orgKeys, empty: 'По ролям: ' + ((C.customerOrg(P) || {}).key || 'застройщик не заведён'), hint: 'Если вы субподрядчик — выберите генподрядчика' }),
+          F('contractorKey', 'Подрядчик (Подрядчик / Субподрядчик)', 'select', { opts: orgKeys, empty: 'По ролям: ' + ((C.builderOrg(P) || {}).key || 'подрядчик не заведён'), hint: 'Если вы субподрядчик — выберите свою организацию' })
+        ], true)
+      );
+      tabs.panes.t3.appendChild(sg);
     },
     ozhr() {
       const o = P.ozhr;
       main.appendChild(head('Общий журнал работ', 'Приказ Минстроя от 02.12.2022 № 1026/пр. Разделы 3 и 5 заполняются из журнала актов автоматически.', [
-        btn('ОЖР целиком', () => makeDoc('Общий журнал работ', () => IDPdf.ozhrDoc(P)), 'btn-primary'), fmtSwitch()
+        fmtSwitch(),
+        ddBtn('Сформировать ▾', [
+          ['<b>ОЖР целиком</b>', () => makeDoc('Общий журнал работ', () => IDPdf.ozhrDoc(P))],
+          ['Титульный лист', () => makeDoc('ОЖР титул', () => IDPdf.ozhrDoc(P, { title: true }))],
+          ['Раздел 3', () => makeDoc('ОЖР раздел 3', () => IDPdf.ozhrDoc(P, { r3: true }))],
+          ['Раздел 5', () => makeDoc('ОЖР раздел 5', () => IDPdf.ozhrDoc(P, { r5: true }))]
+        ], 'btn-primary')
       ]));
-      main.appendChild(card('Титульный лист', [
+      const tabs = pageTabs([['t1', 'Титульный лист'], ['t2', 'Персонал и спецжурналы'], ['t3', 'Работы и контроль']], ozhrTab, k => { ozhrTab = k; });
+      main.appendChild(tabs.bar);
+      Object.values(tabs.panes).forEach(x => main.appendChild(x));
+      let tgt = tabs.panes.t1;
+      tgt.appendChild(card(null, [
         para('Представители застройщика, подрядчика, стройконтроля и авторского надзора берутся из раздела «Представители» (действующие на сегодня). Поля ниже — для того, чего нет в других разделах.'),
         formGrid(o, [
           F('builderRepName', 'Представитель застройщика: ФИО', 'text', { ph: (C.currentRep(P, C.REP_ROLES[0]) || {}).fullName || '', hint: 'Пусто — СК Заказчика' }),
@@ -1150,41 +1801,56 @@
       ]));
       const sub = (title, key, info) => {
         const c = card(title, info ? [para(info)] : []);
-        main.appendChild(c);
+        tgt.appendChild(c);
         collection(c, key, () => P.ozhr[key], { noSearch: true });
       };
+      tgt = tabs.panes.t2;
       sub('Другие лица, осуществляющие строительство', 'others');
       sub('Раздел 1. Инженерно-технический персонал', 'r1');
       sub('Раздел 2. Специальные журналы', 'r2');
-      main.appendChild(card('Раздел 3. Сведения о выполнении работ', [para('Заполняется из «Журнала актов»: даты, наименование работ. Условия производства работ — поле в карточке акта.')]));
+      tgt = tabs.panes.t3;
+      tgt.appendChild(card('Раздел 3. Сведения о выполнении работ', [para('Заполняется из «Актов освидетельствования»: даты, наименование работ. Условия производства работ — поле в карточке акта.')]));
       sub('Раздел 4. Строительный контроль', 'r4');
-      main.appendChild(card('Раздел 5. Перечень исполнительной документации', [para('Заполняется из «Журнала актов» автоматически.')]));
+      tgt.appendChild(card('Раздел 5. Перечень исполнительной документации', [para('Заполняется из «Актов освидетельствования» автоматически.')]));
       sub('Раздел 6. Государственный строительный надзор', 'r6');
       sub('Изменения в записях титульного листа', 'titleChanges');
     },
     check() {
       const list = C.projectCheck(P);
       const errs = list.filter(x => x.lvl === 'err'), warns = list.filter(x => x.lvl === 'warn');
-      main.appendChild(head('Проверка комплекта', 'Что исправить перед печатью: пустые поля, подписанты, сроки документов, даты, суммы. Нажмите на строку — откроется нужный раздел.', [btn('Проверить ещё раз', () => render())]));
-      main.appendChild(card(null, [para(list.length ? '<b>' + errs.length + '</b> ошибок, <b>' + warns.length + '</b> предупреждений.' : 'Всё в порядке — замечаний нет.', '')]));
-      const section = (title, items, cls) => {
+      main.appendChild(head('Проверка комплекта', 'Список дел перед сдачей: красное — в документах будет неверно или пусто, жёлтое — стоит проверить.', [btn('Проверить ещё раз', () => render())]));
+      // итог: готово или сколько осталось
+      const top = document.createElement('div'); top.className = 'ed-status ' + (errs.length ? 'w' : 'ok');
+      top.innerHTML = '<div class="ic">' + (list.length ? (errs.length ? '⚠' : '✓') : '✓') + '</div><div><b>' + (list.length ? (errs.length ? 'Осталось исправить: ' + errs.length + (warns.length ? ' и проверить: ' + warns.length : '') : 'Ошибок нет — можно печатать. Проверить: ' + warns.length) : 'Всё в порядке — комплект готов к печати') + '</b></div>';
+      main.appendChild(top);
+      // дела — группами по разделам, в порядке шагов меню; у каждого «Исправить»
+      const GROUPS = [['#/settings', '📄 Договор и доп. соглашения'], ['#/orgs', '👥 Участники строительства'], ['#/people', '👥 Представители'], ['#/rd', '📐 Проектная и рабочая документация'], ['#/materials', '🧱 Материалы'], ['#/balance', '📦 Движение материалов'], ['#/acts', '📝 Акты освидетельствования'], ['#/smeta', '💰 Смета и КС']];
+      const groups = GROUPS.concat([...new Set(list.map(x => x.where))].filter(w => !GROUPS.some(g => g[0] === w)).map(w => [w, w.replace('#/', '')]));
+      groups.forEach(([where, title]) => {
+        const items = list.filter(x => x.where === where).sort((a, b) => (a.lvl === 'err' ? 0 : 1) - (b.lvl === 'err' ? 0 : 1));
         if (!items.length) return;
-        const c = card(title, []);
-        const ul = document.createElement('div'); ul.className = 'check-list';
+        const ne = items.filter(x => x.lvl === 'err').length;
+        const c = document.createElement('div'); c.className = 'card todo-grp';
+        c.innerHTML = '<div class="todo-h"><b>' + esc(title) + '</b>' + (ne ? '<span class="st r">● ' + ne + '</span>' : '') + (items.length - ne ? '<span class="st w">⚠ ' + (items.length - ne) + '</span>' : '') + '</div>';
         items.forEach(x => {
-          const a = document.createElement('a'); a.href = x.where; a.className = 'check-item ' + cls; a.textContent = x.text;
-          ul.appendChild(a);
+          const r = document.createElement('div'); r.className = 'iss';
+          r.innerHTML = '<span class="d ' + (x.lvl === 'err' ? 'r' : 'w') + '"></span><span class="t">' + esc(x.text) + '</span>';
+          const act = x.actId && P.acts.find(a => a.id === x.actId);
+          r.appendChild(btn(act ? 'Открыть акт' : 'Исправить', () => {
+            if (act) openEditor('acts', P.acts, act, false, () => render(), { focus: (actIssues(act).find(i => x.text.includes(i.text)) || {}).sec });
+            else location.hash = where;
+          }, 'btn-sm' + (x.lvl === 'err' ? ' btn-primary' : '')));
+          c.appendChild(r);
         });
-        c.appendChild(ul); main.appendChild(c);
-      };
-      section('Ошибки — в документах будет неверно или пусто', errs, 'err');
-      section('Предупреждения — стоит проверить', warns, 'warn');
+        main.appendChild(c);
+      });
     },
     balance() {
       const rows = C.materialBalance(P);
-      main.appendChild(head('Остатки материалов', 'Поставлено (количество в «Материалах») − израсходовано по актам (поле «расход» у материала в карточке АОСР / АООК) = остаток на объекте.', [
-        btn('Ведомость', () => makeDoc('Ведомость материалов', () => IDPdf.balanceDoc(P)), 'btn-primary'), fmtSwitch()
+      main.appendChild(head('Движение материалов', 'Поставлено (количество в «Материалах») − израсходовано по актам (поле «расход» у материала в карточке АОСР / АООК) = остаток на объекте.', [
+        fmtSwitch(), btn('Ведомость', () => makeDoc('Ведомость материалов', () => IDPdf.balanceDoc(P)), 'btn-primary')
       ]));
+      main.appendChild(subTabs([['#/materials', 'Материалы и документы', P.materials.length], ['#/balance', 'Движение материалов']], '#/balance'));
       if (!rows.length) { main.appendChild(card(null, [para('Материалов пока нет.')])); return; }
       const t = document.createElement('table'); t.className = 't';
       t.innerHTML = '<tr><th>№</th><th>Материал</th><th style="text-align:right">Поставлено</th><th style="text-align:right">По актам</th><th style="text-align:right">Остаток</th><th>В актах</th></tr>' + rows.map(b =>
@@ -1197,7 +1863,7 @@
       main.appendChild(w);
     },
     docs() {
-      main.appendChild(head('Документы PDF и Word', 'Формирование печатных форм. Файлы создаются на этом устройстве, без интернета. Word (.docx) — если документ нужно поправить перед печатью.', [fmtSwitch()]));
+      main.appendChild(head('Реестр и выгрузка ИД', 'Формирование печатных форм. Файлы создаются на этом устройстве, без интернета. Word (.docx) — если документ нужно поправить перед печатью.', [fmtSwitch()]));
       const grid = document.createElement('div'); grid.className = 'doc-grid';
       const dc = (title, desc, buttons) => {
         const c = document.createElement('div'); c.className = 'card doc-card';
@@ -1215,7 +1881,7 @@
       one.appendChild(ob);
       grid.appendChild(one);
       const marked = P.acts.filter(a => a.print && a.type).length;
-      dc('Пакет актов', marked ? 'Отмечено к печати: ' + marked + '. Отметки ставятся в «Журнале актов».' : 'Нет отметок — будут выгружены все акты.', [
+      dc('Пакет актов', marked ? 'Отмечено к печати: ' + marked + '. Отметки ставятся в «Актах освидетельствования».' : 'Нет отметок — будут выгружены все акты.', [
         btn('ZIP: каждый отдельно', () => batchActs('zip'), 'btn-primary'), btn('Одним PDF', () => batchActs('one'))
       ]);
       const fitJ = document.createElement('label'); fitJ.className = 'check small';
@@ -1256,7 +1922,7 @@
       acts.append(
         btn('Сохранить проект в файл', saveFile, 'btn-primary'),
         btn('Открыть файл проекта', () => $('#fileInput').click()),
-        btn('Новый проект', () => { const p = C.emptyProject(); store.projects[p.id] = p; switchTo(p.id); toast('Создан новый проект'); }),
+        btn('Новый проект', () => { const p = C.emptyProject(); store.projects[p.id] = p; switchTo(p.id); location.hash = '#/home'; newObjectWizard(); }),
         btn('Новый объект на основе текущего…', newFromCurrent)
       );
       if (deferredInstall) acts.appendChild(btn('Установить приложение', installApp));
@@ -1478,19 +2144,39 @@
 
   // ================= маршрутизация =================
   function render() {
-    const view = (location.hash.replace(/^#\//, '') || 'acts').split('?')[0];
-    const fn = VIEWS[view] || VIEWS.acts;
+    const view = (location.hash.replace(/^#\//, '') || 'home').split('?')[0];
+    const cur = VIEWS[view] ? view : 'home';
     main.innerHTML = '';
-    fn();
-    $$('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.view === (VIEWS[view] ? view : 'acts')));
+    VIEWS[cur]();
+    $$('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.view === cur || (a.dataset.also || '').split(',').includes(cur)));
+    $$('.bottom-nav a').forEach(a => a.classList.toggle('active', a.dataset.view === cur || (cur === 'balance' && a.dataset.view === 'materials')));
     document.body.classList.remove('nav-open');
     updateHeader();
+    updateNavCounts();
+  }
+  // счётчики в меню: сколько требует внимания (красный — срочно)
+  function updateNavCounts() {
+    const set = (k, n, red) => { const el = document.querySelector('.sidebar [data-cnt="' + k + '"]'); if (el) { el.textContent = n ? String(n) : ''; el.classList.toggle('r', !!red); } };
+    try {
+      const today = C.todayISO();
+      set('parties', (P.candidates || []).length);
+      const actsBad = P.acts.filter(a => a.type && ((a.imported && !a.importDone && C.importIssues(P, a).length) || C.actView(P, a).warnings.length)).length;
+      set('acts', actsBad);
+      // истёкший документ — проблема, только пока материал ещё на объекте (остаток не израсходован)
+      const expired = C.materialBalance(P).filter(x => C.matExpired(x.m, today) && (x.rest === null || x.rest > 0)).length;
+      set('materials', expired, expired > 0);
+      const chk = C.projectCheck(P), errs = chk.filter(x => x.lvl === 'err').length;
+      set('check', errs || chk.length, errs > 0);
+      set('rd', chk.filter(x => x.where === '#/rd').length);
+    } catch (e) { console.warn(e); }
   }
   // переключение не меняет «время изменения» проекта (иначе синхронизация считала бы его изменённым)
   function switchTo(id) { store.current = id; P = store.projects[id]; if (!P.updatedAt) P.updatedAt = new Date().toISOString(); saveStore(); render(); updateHeader(); }
   function saveStore() { try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch (e) { } }
   window.addEventListener('hashchange', () => { closeDialog(); render(); window.scrollTo(0, 0); });
   $('#menuBtn').addEventListener('click', () => document.body.classList.toggle('nav-open'));
+  $('#bnMenu').addEventListener('click', () => document.body.classList.toggle('nav-open'));
+  $('#qsBtn').addEventListener('click', () => quickSearch());
   $('#scrim').addEventListener('click', () => document.body.classList.remove('nav-open'));
 
   // ================= файлы проекта =================
@@ -1544,6 +2230,42 @@
   }
   // формат выгрузки: PDF или Word (.docx) — переключатель на страницах с печатью, запоминается на устройстве
   const outFmt = () => { try { return localStorage.getItem('idgen.outFormat') === 'docx' ? 'docx' : 'pdf'; } catch (e) { return 'pdf'; } };
+  // кнопка с выпадающим списком: items — [[подпись (html), действие], …] или функция, которая их вернёт (подписи на момент открытия)
+  function ddBtn(label, items, cls) {
+    const w = document.createElement('div'); w.className = 'dd';
+    const m = document.createElement('div'); m.className = 'dd-menu';
+    const close = () => { w.classList.remove('open'); document.removeEventListener('click', close); };
+    const b = btn(label, e => {
+      e.stopPropagation();
+      if (w.classList.contains('open')) { close(); return; }
+      m.innerHTML = '';
+      (typeof items === 'function' ? items() : items).forEach(([l, fn]) => {
+        const x = document.createElement('button'); x.type = 'button'; x.innerHTML = l;
+        x.addEventListener('click', () => { close(); fn(); }); m.appendChild(x);
+      });
+      w.classList.add('open'); setTimeout(() => document.addEventListener('click', close));
+    }, cls);
+    w.append(b, m); return w;
+  }
+  // «?» с подсказкой при наведении / нажатии
+  function helpTip(text) {
+    const t = document.createElement('span'); t.className = 'help-q'; t.tabIndex = 0; t.textContent = '?'; t.dataset.tip = text;
+    return t;
+  }
+  // вкладки внутри экрана (без смены адреса): items — [[ключ, подпись], …]; возвращает { bar, panes }
+  function pageTabs(items, active, onSwitch) {
+    const bar = document.createElement('div'); bar.className = 'subtabs';
+    const panes = {};
+    if (!items.some(x => x[0] === active)) active = items[0][0];
+    items.forEach(([k, label]) => {
+      const a = document.createElement('a'); a.tabIndex = 0; a.textContent = label; a.className = k === active ? 'on' : '';
+      const p = document.createElement('div'); p.hidden = k !== active; panes[k] = p;
+      const go = () => { $$('a', bar).forEach(x => x.classList.toggle('on', x === a)); Object.keys(panes).forEach(x => { panes[x].hidden = x !== k; }); onSwitch && onSwitch(k); };
+      a.addEventListener('click', go); a.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+      bar.appendChild(a);
+    });
+    return { bar, panes };
+  }
   function fmtSwitch() {
     const w = document.createElement('div'); w.className = 'seg'; w.title = 'В каком формате выгружать документы';
     const draw = () => {
@@ -1603,6 +2325,79 @@
       deliver(blob, safeName(name + ' ' + (P.settings.objectName || '')) + '.zip');
     } catch (e) { console.error(e); closeDialog(); toast('Ошибка: ' + e.message); }
   }
+  // организации / представители, «засветившиеся» в загруженных документах (P.candidates): принять — откроется карточка
+  // с заполненными полями, после сохранения кандидат уходит из списка; отклонить — убрать из списка
+  function candidatesPanel(el, kind, after) {
+    const draw = () => {
+      el.innerHTML = '';
+      const exists = c => kind === 'org'
+        ? P.orgs.some(o => (c.data.inn && o.inn === c.data.inn) || C.s(o.name).toLowerCase().replace(/[«»"\s]/g, '') === C.s(c.data.name).toLowerCase().replace(/[«»"\s]/g, ''))
+        : P.people.some(r => C.shortName(r.fullName).replace(/[\s.]/g, '').toLowerCase() === C.shortName(c.data.fullName).replace(/[\s.]/g, '').toLowerCase() && (!c.data.role || r.role === c.data.role));
+      // уже заведённые — убираем из списка
+      P.candidates = (P.candidates || []).filter(c => c.kind !== kind || !exists(c));
+      const list = P.candidates.filter(c => c.kind === kind);
+      if (!list.length) return;
+      const box = card((kind === 'org' ? 'Организации' : 'Представители') + ' из загруженных документов (' + list.length + ')', [para('Нашлись в документах, но ещё не заведены в проекте. «Принять» откроет карточку с уже заполненными полями — проверьте и сохраните.')]);
+      list.forEach(c => {
+        const n = document.createElement('div'); n.className = 'row-note';
+        const d = c.data;
+        n.innerHTML = '<span><b>' + esc(kind === 'org' ? (d.name || d.key) : d.fullName) + '</b>' + esc(kind === 'org'
+          ? (d.role ? ' — ' + d.role : '') + (d.inn ? ', ИНН ' + d.inn : '') + (d.ogrn ? ', ОГРН ' + d.ogrn : '')
+          : (d.position ? ', ' + d.position.toLowerCase() : '') + (d.role ? ' — ' + d.role : '') + (d.orgKey || d._org ? ' (' + (d.orgKey || d._org) + ')' : '') + (d.authDoc ? ', ' + d.authDoc : '')) +
+          '<br><span class="muted">из: ' + esc(c.source || 'документа') + '</span></span>';
+        n.appendChild(btn('Принять', () => {
+          const it = Object.assign({ id: C.uid() }, JSON.parse(JSON.stringify(d)));
+          // организация представителя — если её уже приняли (по названию из документа)
+          if (kind === 'person') { if (!it.orgKey && it._org) { const nm = x => C.s(x).toLowerCase().replace(/[«»"\s]/g, '').replace(/^(ооо|зао|ао|пао|оао|ип)/, ''); const o = P.orgs.find(o => nm(o.name) === nm(it._org) || nm(o.key) === nm(it._org)); if (o) it.orgKey = o.key; } delete it._org; }
+          if (kind === 'org' && (!it.key || P.orgs.some(o => o.key === it.key))) { let k = it.key || (d.name || 'Организация').replace(/^(ООО|ЗАО|АО|ПАО|ИП)\s*/, '').replace(/[«»"]/g, '').slice(0, 30), i = 2; const b = k; while (P.orgs.some(o => o.key === k)) k = b + ' ' + i++; it.key = k; }
+          openEditor(kind === 'org' ? 'orgs' : 'people', kind === 'org' ? P.orgs : P.people, it, true, () => { P.candidates = P.candidates.filter(x => x !== c); touch(); draw(); after && after(); });
+        }, 'btn-sm btn-primary'));
+        n.appendChild(btn('Отклонить', () => { P.candidates = P.candidates.filter(x => x !== c); touch(); draw(); }, 'btn-sm'));
+        box.appendChild(n);
+      });
+      el.appendChild(box);
+    };
+    draw();
+  }
+
+  // пакетная правка актов из чужой ИД: раздел, замена текста (чужие шифры в пп. 4, 6, 7), подписанты, «приведены»
+  function batchFixImported(list, after) {
+    // самый частый чужой шифр из пп. 4, 6 — подставим в «Найти»
+    const cnt = {};
+    list.forEach(a => C.importIssues(P, a).forEach(t => { const m = /шифр «([^»]+)» — его нет/.exec(t); if (m) cnt[m[1]] = (cnt[m[1]] || 0) + 1; }));
+    const top = Object.keys(cnt).sort((x, y) => cnt[y] - cnt[x])[0] || '';
+    const w = { section: '', find: top, repl: '', markDone: '' };
+    const body = document.createElement('div');
+    body.appendChild(para('Изменения применятся ко всем ' + list.length + ' актам из чужой ИД, которые ещё не приведены. Пустые поля — не менять. Перед изменением сохраняется снимок проекта (можно откатить в «Проекты и файлы → История версий»).'));
+    const ppl = () => P.people.map(r => ({ v: r.id, l: C.shortName(r.fullName) + (r.position ? ', ' + r.position.toLowerCase() : '') + ' — ' + r.role }));
+    body.appendChild(formGrid(w, [
+      F('section', 'Раздел для всех актов', 'combo', { opts: () => P.lists.sections, hint: 'Шифр и листы в п. 2 берутся из раздела' }),
+      F('find', 'Заменить текст (пп. 4, 6, 7, доп. сведения, приложения)', 'text', { wide: 1, hint: top ? 'Подставлен самый частый чужой шифр' : 'Например, чужой шифр проекта' }),
+      F('repl', 'на', 'text', { wide: 1, ph: (C.rdFor(P, { section: w.section || (list[0] && list[0].section) }, null).code || ''), hint: 'Пусто — подставится шифр раздела акта' }),
+      ...C.REP_ROLES.slice(0, 4).map((role, i) => F('rep' + i, 'Подписант: ' + role.replace(/^\d\.\s*/, ''), 'select', { opts: ppl, empty: 'не менять' })),
+      F('markDone', 'Отметить все как приведённые к нашему формату', 'check', { wide: 1 })
+    ]));
+    openDialog('Исправить акты из чужой ИД', body, ['spacer', { label: 'Отмена', onClick: closeDialog }, {
+      label: 'Применить', cls: 'btn-primary', onClick: () => {
+        if (window.IDBackup) IDBackup.snapshot('перед пакетной правкой чужой ИД');
+        let n = 0;
+        const esc_ = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        list.forEach(a => {
+          if (w.section) a.section = w.section;
+          if (w.find) {
+            const to = w.repl || C.rdFor(P, a, null).code || '';
+            const re = new RegExp(esc_(String(w.find).trim()).replace(/\s+/g, '\\s*'), 'gi');
+            ['docs', 'manualNorms', 'manualNext', 'extra', 'manualAttach'].forEach(k => { if (a[k] && re.test(a[k])) { a[k] = a[k].replace(re, to); n++; } re.lastIndex = 0; });
+          }
+          C.REP_ROLES.slice(0, 4).forEach((r, i) => { if (w['rep' + i]) a['rep' + i] = w['rep' + i]; });
+          if (w.markDone) a.importDone = 1;
+        });
+        touch(); closeDialog(); after && after();
+        toast('Готово: актов ' + list.length + (w.find ? ', замен текста: ' + n : ''));
+      }
+    }]);
+  }
+
   function batchActs(mode) {
     let acts = P.acts.filter(a => a.print && a.type);
     const go = (list, m) => {
@@ -1707,7 +2502,7 @@
   window.IDApp = {
     get project() { return P; }, store: () => store,
     // для модуля загрузки документов (importer.js)
-    ui: { esc, head, card, btn, para, toast, openDialog, closeDialog, confirmBox, loadScript, main: () => main },
+    ui: { esc, head, card, btn, para, toast, undoable, openDialog, closeDialog, confirmBox, loadScript, main: () => main },
     touch, render, projTitle,
     openProject(p, replaceId) {
       p = C.normalize(p);

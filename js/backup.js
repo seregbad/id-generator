@@ -57,6 +57,8 @@
   }
   let lastAuto = {};
   function autoSnapshot() {
+    // backup.js грузится раньше app.js: если приложение ещё не готово — повторить чуть позже
+    if (!window.IDApp) { setTimeout(autoSnapshot, 1000); return; }
     const p = IDApp.project;
     if (!p || Date.now() - (lastAuto[p.id] || 0) < AUTO_EVERY) return;
     lastAuto[p.id] = Date.now();

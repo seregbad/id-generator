@@ -417,10 +417,16 @@
   const withFit = (p, d) => { if (fitJournals(p)) d.fitParts = [d.content]; return d; };
   function registryDoc(p) {
     const body = [head(['№ п/п', 'Наименование документа', 'Дата', 'Подписанты', 'Кол-во листов', 'Примечание'])];
-    p.acts.filter(a => a.type).forEach((a, i) => {
+    // после каждого акта — его исполнительные схемы (справочник «Исполнительные схемы»), в конце — схемы без акта
+    let n = 0;
+    const used = new Set();
+    const schRow = x => { used.add(x.id); body.push([{ text: String(++n), alignment: 'center' }, C.schemeLabel(Object.assign({}, x, { date: '' })), { text: C.fmtDate(x.date), alignment: 'center' }, '', '', s(x.note)]); };
+    p.acts.filter(a => a.type).forEach(a => {
       const v = C.actView(p, a);
-      body.push([{ text: String(i + 1), alignment: 'center' }, v.title, { text: C.fmtDate(v.date), alignment: 'center' }, v.signers, s(a.sheetsCount), s(a.note)]);
+      body.push([{ text: String(++n), alignment: 'center' }, v.title, { text: C.fmtDate(v.date), alignment: 'center' }, v.signers, s(a.sheetsCount), s(a.note)]);
+      (a.schemeIds || []).map(id => (p.schemes || []).find(x => x.id === id)).filter(x => x && !used.has(x.id)).forEach(schRow);
     });
+    (p.schemes || []).filter(x => !used.has(x.id)).forEach(schRow);
     if (body.length === 1) body.push(['', 'Нет актов', '', '', '', '']);
     const st = p.settings;
     return withFit(p, doc([
@@ -588,7 +594,7 @@
       lbl('Уполномоченный представитель лица, ответственного за эксплуатацию здания, сооружения, или регионального оператора', { bold: true }),
       repTable(H5, o.operatorRepName ? [['1', o.operatorRepName, o.operatorRepPos, o.operatorRepDoc, '']] : []),
       lbl('Сведения о выданном разрешении на строительство (заполняется в случае, если разрешение на строительство требуется в соответствии со статьей 51 Градостроительного кодекса Российской Федерации)', { bold: true }),
-      val(st.permit), cap('(номер, дата выдачи разрешения на строительство, наименование органа исполнительной власти, государственной корпорации или органа местного самоуправления, выдавших разрешение)'),
+      val(st.permitNone ? 'Не требуется' : st.permit), cap('(номер, дата выдачи разрешения на строительство, наименование органа исполнительной власти, государственной корпорации или органа местного самоуправления, выдавших разрешение)'),
       lbl('Лицо, осуществляющее подготовку проектной документации', { bold: true }),
       val(des && des.type === 'ИП' ? C.orgLine(des) : ''), cap(orgCap1),
       val(des && des.type !== 'ИП' ? C.orgLine(des) : ''), cap(orgCap2),
@@ -597,7 +603,7 @@
       repTable(['№ п/п', 'Полное и (или) сокращенное наименование или фамилия, имя, отчество (последнее - при наличии) лица, осуществляющего подготовку проектной документации, сведения о разделах проектной документации, подготовленных этим лицом', 'Должность (при наличии)', 'Наименование, дата, номер документа, подтверждающего полномочие', 'Идентификационный номер в национальном реестре специалистов в области архитектурно-строительного проектирования', 'Подпись'],
         an ? [['1', C.personOrgLine(p, an), an.position, an.authDoc, an.nrs, '']] : []),
       lbl('Сведения о положительном заключении экспертизы проектной документации (заполняется в случае, если в соответствии со статьей 49 Градостроительного кодекса Российской Федерации проводится экспертиза проектной документации)', { bold: true }),
-      val(st.expertise), cap('(номер и дата выдачи, орган или организация, его утвердившие)'),
+      val(st.expertiseNone ? 'Не требуется' : st.expertise), cap('(номер и дата выдачи, орган или организация, его утвердившие)'),
       lbl('Лицо, осуществляющее строительство, реконструкцию, капитальный ремонт', { bold: true }),
       val(bld && bld.type === 'ИП' ? C.orgLine(bld) : ''), cap(orgCap1),
       val(bld && bld.type !== 'ИП' ? C.orgLine(bld) : ''), cap(orgCap2),
@@ -695,31 +701,34 @@
       nums(9)
     ].map((r, i) => i < 3 ? r.map(c => (c && c.text !== undefined) ? Object.assign({ bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' }, c) : (typeof c === 'string' ? { text: c, bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' } : c)) : r);
     let n = 0;
-    const totRow = (t, v) => [{ text: t, colSpan: 6, alignment: 'right', bold: true }, {}, {}, {}, {}, {}, { text: v, colSpan: 3, alignment: 'right', bold: true }, {}, {}];
+    // итоги — как в КС-2 / КС-3: подпись без рамок справа, суммы в рамках ровно под столбцами «Всего», «работ», «материала»
+    const BOX = [true, true, true, true];
+    const totRow = (t, v, w, m) => [{ text: t, colSpan: 6, alignment: 'right', border: NB }, {}, {}, {}, {}, {},
+      R(C.money(v), { border: BOX, bold: true }),
+      w === undefined ? { text: '', border: NB } : R(C.money(w), { border: BOX }),
+      m === undefined ? { text: '', border: NB } : R(C.money(m), { border: BOX })];
     // разделы: работы по договору, затем по каждому доп. соглашению (нумерация сквозная), у каждого — подытог
     const groups = C.smetaGroups(p).filter(g => g.rows.length);
     const sections = groups.some(g => g.ds);
     groups.forEach(g => {
       if (sections) body.push([{ text: g.ds ? dsHead(g.ds) : 'Работы по договору № ' + s(st.contractNo) + (st.contractDate ? ' от ' + C.fmtDate(st.contractDate) : ''), colSpan: 9, bold: true, italics: true }, {}, {}, {}, {}, {}, {}, {}, {}]);
-      let sum = 0;
+      let sum = 0, sw = 0, sm = 0;
       g.rows.forEach(r => {
-        const c = C.smetaRow(r); n++; sum += c.total;
+        const c = C.smetaRow(r); n++; sum += c.total; sw += c.work; sm += c.mat;
         body.push([{ text: String(n), alignment: 'center' }, s(r.name), { text: C.unitNorm(r.unit), alignment: 'center' }, R(C.qty(r.qty)),
           R(r.priceWork === '' || r.priceWork === undefined ? '' : C.money(r.priceWork)), R(r.priceMat === '' || r.priceMat === undefined ? '' : C.money(r.priceMat)),
           R(C.money(c.total)), R(C.money(c.work)), R(C.money(c.mat))]);
       });
-      if (sections) body.push(totRow('Итого по разделу:', C.money(C.round2(sum))));
+      if (sections) body.push(totRow('Итого по разделу', C.round2(sum), C.round2(sw), C.round2(sm)));
     });
     // цены с НДС: «Итого» и «в т.ч. НДС» (без дублирующего «Всего с НДС»); цены без НДС: «Итого», «НДС», «Всего с НДС»
     if (tot.top) {
-      body.push(totRow('Итого без НДС (работы и материалы):', C.money(tot.net)));
-      body.push(totRow('в т.ч. работы / материалы:', C.money(tot.work) + ' / ' + C.money(tot.mat)));
-      body.push(totRow('НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)));
-      body.push(totRow('Всего с НДС:', C.money(tot.gross)));
+      body.push(totRow('Итого без НДС', tot.net, tot.work, tot.mat));
+      body.push(totRow('НДС ' + tot.vatPct + '%', tot.vatSum));
+      body.push(totRow('Всего с НДС', tot.gross));
     } else {
-      body.push(totRow('Итого (работы и материалы):', C.money(tot.gross)));
-      body.push(totRow('в т.ч. работы / материалы:', C.money(tot.work) + ' / ' + C.money(tot.mat)));
-      body.push(totRow('в т.ч. НДС ' + tot.vatPct + '%:', C.money(tot.vatSum)));
+      body.push(totRow('Итого', tot.gross, tot.work, tot.mat));
+      body.push(totRow('в т.ч. НДС ' + tot.vatPct + '%', tot.vatSum));
     }
     const sideBlock = (title, role, pos, name) => ({
       stack: [
@@ -874,9 +883,10 @@
       const d = C.ksScopeDs(p);
       if (d) return !d.priceMode && C.num(d.amount) ? C.num(d.amount) : groupGross(d.id);
       // КС по основному договору — цена основных работ с учётом ДС, которые её меняли
-      return C.contractPriceNow(p).mainNow || groupGross('');
+      return C.contractPriceNow(p, p.ks.date).mainNow || groupGross('');
     }
-    return C.contractPriceNow(p).total || C.smetaTotals(p, !!p.ks.worksOnly).gross;
+    // цена договора на дату КС: ДС, подписанные позже, ещё не действуют
+    return C.contractPriceNow(p, p.ks.date).total || C.smetaTotals(p, !!p.ks.worksOnly).gross;
   }
 
   function ks3Doc(p) {
