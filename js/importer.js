@@ -2010,15 +2010,18 @@
     const x = compact(a), y = compact(b);
     if (!x || !y) return 0;
     if (x === y) return 1;
+    // одно наименование — начало другого («Устройство монолитной плиты 250мм» и то же с составом работ через дефисы)
+    const [sh, lg] = x.length <= y.length ? [x, y] : [y, x];
+    if (sh.length >= 20 && lg.startsWith(sh)) return 0.9;
     const big = s => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const k = s.substr(i, 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
     const bx = big(x), by = big(y);
     let common = 0; bx.forEach((n, k) => { common += Math.min(n, by.get(k) || 0); });
     return 2 * common / (x.length - 1 + y.length - 1);
   }
   // строки ДС ↔ позиции сметы: лучшие пары первыми, каждая позиция сметы — не больше одной строки ДС.
-  // Новые позиции этого же ДС и исключённые не берём
+  // Исключённые не берём; позиции этого же ДС берём — при повторной загрузке ДС они не задвоятся
   function matchSmetaAll(P, names, dsId) {
-    const cand = P.smeta.filter(r => r.name && r.dsId !== dsId && !(r.excludedBy && C.dsById(P, r.excludedBy)));
+    const cand = P.smeta.filter(r => r.name && !(r.excludedBy && C.dsById(P, r.excludedBy)));
     const pairs = [];
     names.forEach((n, i) => cand.forEach(r => { const k = nameSim(n, r.name); if (k >= 0.75) pairs.push({ i, r, k }); }));
     pairs.sort((a, b) => b.k - a.k);
@@ -2310,30 +2313,39 @@
       const dsId = ex ? ex.id : C.uid(); // id заранее — на него ссылаются изменения позиций
       // цены в ДС — с НДС; если смета ведётся без НДС, переводим, иначе «изменится» каждая позиция
       const vat = C.num(st.vat), toSmeta = v => v === '' || !C.vatTop(P) ? v : C.round2(v / (1 + vat));
-      const all = est.map(r => ({ id: C.uid(), name: str(r.name), unit: str(r.unit), qty: numStr(r.qty), priceWork: toSmeta(numStr(r.price_work)), priceMat: toSmeta(numStr(r.price_mat)) }));
+      // no — номер строки в расчёте ДС (идёт в КС-2 в графу «позиции по смете»)
+      const all = est.map((r, i) => ({ id: C.uid(), no: String(i + 1), name: str(r.name), unit: str(r.unit), qty: numStr(r.qty), priceWork: toSmeta(numStr(r.price_work)), priceMat: toSmeta(numStr(r.price_mat)) }));
       // строки ДС, которые есть в смете, — это изменение существующих позиций, а не новые работы
       const changes = [];
       const matched = matchSmetaAll(P, all.map(r => r.name), dsId);
+      // ДС с новой редакцией всего расчёта (совпала хотя бы половина позиций договора)
+      const contractRows = P.smeta.filter(r => r.name && !(r.dsId && C.dsById(P, r.dsId)) && !(r.excludedBy && C.dsById(P, r.excludedBy)));
+      const usedRows = new Set(matched.values());
+      const fullCalc = contractRows.length > 0 && [...usedRows].filter(r => contractRows.includes(r)).length >= contractRows.length / 2;
       const rows = all.filter((r, i) => {
         const m = matched.get(i);
         if (!m) return true;
+        if (m.dsId && m.dsId === dsId) return false; // уже заведена по этому ДС (повторная загрузка)
         const oldUnit = C.num(m.priceWork) + C.num(m.priceMat), newUnit = C.num(r.priceWork) + C.num(r.priceMat);
         const qtyCh = r.qty !== '' && Math.abs(C.num(r.qty) - C.num(m.qty)) > 1e-6;
         const priceCh = newUnit && Math.abs(newUnit - oldUnit) > 0.005;
         if (qtyCh || priceCh) changes.push({ m, r, qtyCh, priceCh, newUnit });
         return false; // совпала и не изменилась — в ДС просто повторена позиция договора
       });
-      const data = { no: str(sup.no), date: iso(sup.date), subject: str(sup.subject), priceMode: sup.priceMode || '', amount: str(sup.amount), newPrice: str(sup.newPrice), startDate: iso(sup.startDate), endDate: iso(sup.endDate) };
-      const labels = { no: 'Номер ДС', date: 'Дата ДС', subject: 'Предмет', amount: 'Изменение цены, руб. с НДС (уменьшение — минус)', newPrice: 'Новая цена основных работ, руб. с НДС (доп. работы по другим ДС прибавятся)', startDate: 'Новое начало работ', endDate: 'Новое окончание работ' };
+      const data = { no: str(sup.no), date: iso(sup.date), subject: str(sup.subject), priceMode: sup.priceMode || '', amount: str(sup.amount), newPrice: str(sup.newPrice), startDate: iso(sup.startDate), endDate: iso(sup.endDate), fullCalc: fullCalc ? 1 : '' };
+      const labels = { no: 'Номер ДС', date: 'Дата ДС', subject: 'Предмет', amount: 'Изменение цены, руб. с НДС (уменьшение — минус)', newPrice: 'Новая цена основных работ, руб. с НДС (доп. работы по другим ДС прибавятся)', startDate: 'Новое начало работ', endDate: 'Новое окончание работ', fullCalc: 'Новая редакция всего расчёта стоимости (номера позиций в КС — по ДС)' };
       const warn = sup.contract_no && st.contractNo && norm(sup.contract_no) !== norm(st.contractNo) ? ' — внимание: ДС к договору № ' + sup.contract_no + ', а в проекте № ' + st.contractNo : '';
       out.push({
         kind: 'Доп. соглашение', title: (ex ? 'Обновить ' : 'Добавить ') + 'доп. соглашение № ' + (sup.no || '—') + (sup.date ? ' от ' + C.fmtDate(iso(sup.date)) : '') +
           (all.length ? ' (строк в расчёте: ' + all.length + ', совпали со сметой: ' + matched.size + ', изменились: ' + changes.length + ')' : ' (таблица работ не найдена)') + warn, checked: true, data,
-        fields: Object.keys(labels).filter(k => k !== (data.priceMode ? 'amount' : 'newPrice')).map(k => F(k, labels[k], /Date$|^date$/.test(k) ? 'date' : 'text')),
+        fields: Object.keys(labels).filter(k => k !== (data.priceMode ? 'amount' : 'newPrice')).map(k => F(k, labels[k], k === 'fullCalc' ? 'check' : /Date$|^date$/.test(k) ? 'date' : 'text')),
         apply: d => {
-          const v = Object.assign({}, d, { amount: d.amount === '' ? '' : C.num(d.amount), newPrice: d.newPrice === '' ? '' : C.num(d.newPrice) });
-          if (ex) Object.keys(v).forEach(k => { if (str(v[k]) !== '') ex[k] = v[k]; });
+          const v = Object.assign({}, d, { amount: d.amount === '' ? '' : C.num(d.amount), newPrice: d.newPrice === '' ? '' : C.num(d.newPrice), fullCalc: d.fullCalc ? true : '' });
+          if (ex) { Object.keys(v).forEach(k => { if (str(v[k]) !== '') ex[k] = v[k]; }); if (!d.fullCalc) delete ex.fullCalc; }
           else P.supplements.push(Object.assign({ id: dsId }, v));
+          // новая редакция расчёта: позициям договора — номера по расчёту ДС (для графы «позиции по смете» КС-2)
+          // (позиции других ДС с доп. работами не трогаем — у них свой расчёт)
+          matched.forEach((m, i) => { if (m.dsId === dsId || (d.fullCalc && !C.rowDs(P, m))) m.no = all[i].no; });
         }
       });
       const lblDs = 'ДС № ' + (sup.no || '—');
@@ -2357,9 +2369,7 @@
         return { m, act: 'ch', to: { qty: qtyCh ? r.qty : m.qty, priceWork: pw, priceMat: pm }, what, note: compact(m.name) !== compact(r.name) ? 'в ДС: «' + r.name.slice(0, 90) + (r.name.length > 90 ? '…' : '') + '»' : '' };
       });
       // ДС с новой редакцией всего расчёта (совпала хотя бы половина позиций договора): позиций договора, которых в нём нет, возможно, больше нет
-      const contractRows = P.smeta.filter(r => r.name && !(r.dsId && C.dsById(P, r.dsId)) && !(r.excludedBy && C.dsById(P, r.excludedBy)));
-      const usedRows = new Set(matched.values());
-      if (contractRows.length && usedRows.size >= contractRows.length / 2) contractRows.filter(r => !usedRows.has(r)).forEach(m => pend.push({ m, act: 'ex', note: 'нет в расчёте ДС', what: 'нет в расчёте ДС — исключить?' }));
+      if (fullCalc) contractRows.filter(r => !usedRows.has(r)).forEach(m => pend.push({ m, act: 'ex', note: 'нет в расчёте ДС', what: 'нет в расчёте ДС — исключить?' }));
       if (pend.length) out.push({
         kind: 'Смета', title: 'Изменения позиций сметы по ' + lblDs + ': ' + pend.length + ' — появятся у позиций в «Смете», там их примете кнопкой «Применить» (по одной или все сразу)', checked: true,
         data: {}, fields: [], valid: needDs,
@@ -2383,7 +2393,9 @@
         apply: d => {
           // «заменить» — только позиции того же основания, остальные разделы не трогаем
           if (d.replace) for (let i = P.smeta.length - 1; i >= 0; i--) if ((P.smeta[i].dsId || '') === (d.dsId || '')) P.smeta.splice(i, 1);
-          rows.forEach(r => P.smeta.push(d.dsId ? Object.assign(r, { dsId: d.dsId }) : r));
+          // номер позиции в документе (графа «позиции по смете» КС-2): при дописывании — продолжение
+          const base = P.smeta.filter(x => x.name && (x.dsId || '') === (d.dsId || '')).length;
+          rows.forEach((r, i) => { r.no = String(base + i + 1); P.smeta.push(d.dsId ? Object.assign(r, { dsId: d.dsId }) : r); });
         }
       });
     }

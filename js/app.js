@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '63 (17.11.2026)';
+  const APP_VERSION = '64 (17.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -530,6 +530,7 @@
         ], empty: 'Увеличивается / уменьшается на сумму (доп. работы)' }),
         F('amount', 'На сумму, руб. с НДС (уменьшение — со знаком минус)', 'number', { show: w => !w.priceMode, hint: 'Пусто — по позициям этого ДС в смете; 0 — цена не меняется (например, ДС только про сроки)' }),
         F('newPrice', 'Новая цена, руб. с НДС', 'number', { show: w => !!w.priceMode, hint: 'Например, ДС № 2 «Общая стоимость составляет 9 655 000» по расчёту основных работ — это «новая цена основных работ»' }),
+        F('fullCalc', 'ДС утверждает новую редакцию всего расчёта стоимости (вместо приложения к договору)', 'check', { wide: 1, hint: 'Тогда его позиции — основные работы «в редакции ДС», а в КС-2 номера позиций по смете — по расчёту этого ДС. Не отмечайте, если в ДС только дополнительные работы' }),
         F('startDate', 'Новое начало работ', 'date'), F('endDate', 'Новое окончание работ', 'date'),
         F('note', 'Примечание', 'textarea', { wide: 1 })
       ],
@@ -540,7 +541,7 @@
           title: 'ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : '') + (d.subject ? ' — ' + d.subject : ''),
           sub: [st && st.delta ? 'цена ' + (st.delta > 0 ? '+' : '−') + C.money(Math.abs(st.delta)) + ' → ' + C.money(st.after) : 'цена не меняется',
             d.endDate ? 'окончание ' + C.fmtDate(d.endDate) : ''].filter(Boolean).join(' · '),
-          badges: [n ? { t: 'позиций в смете: ' + n, c: 'ok' } : null, ex ? { t: 'исключено позиций: ' + ex, c: 'warn' } : null, !d.no || !d.date ? { t: 'нет номера или даты', c: 'warn' } : null]
+          badges: [d.fullCalc ? { t: 'новая редакция расчёта', c: 'ok' } : null, n ? { t: 'позиций в смете: ' + n, c: 'ok' } : null, ex ? { t: 'исключено позиций: ' + ex, c: 'warn' } : null, !d.no || !d.date ? { t: 'нет номера или даты', c: 'warn' } : null]
         };
       },
       search: d => [d.no, d.subject, d.note].join(' ')
@@ -549,6 +550,7 @@
       title: 'Позиции сметы', one: 'Позиция сметы',
       fields: () => [
         F('name', 'Наименование работ и затрат', 'textarea', { req: 1, wide: 1 }),
+        F('no', '№ в расчёте', 'text', { hint: 'Номер позиции в документе, где она согласована (договор, его редакция по ДС или расчёт ДС) — идёт в КС-2 в графу «позиции по смете». Пусто — по порядку' }),
         F('unit', 'Ед. изм.', 'combo', { opts: units }),
         F('qty', 'Количество', 'number'),
         F('priceWork', 'Цена работ за ед., ' + (C.vatTop(P) ? 'без НДС' : 'с НДС'), 'number'),
@@ -562,9 +564,9 @@
         const ds = C.dsById(P, r.dsId), ex = C.dsById(P, r.excludedBy);
         const chs = (r.changes || []).filter(ch => C.dsById(P, ch.dsId));
         const was = chs.length ? chs[0].from : null; // как было по договору
-        const no = C.smetaOrdered(P).indexOf(r); // сквозной номер, как в печатной смете
         return {
-          num: no >= 0 ? String(no + 1) : '', cls: ex ? 'excl' : '',
+          // номер позиции в её расчёте (договор / редакция по ДС / ДС) — он же в графе «позиции по смете» КС-2
+          num: C.smetaNo(P, r), cls: ex ? 'excl' : '',
           title: r.name || 'Без названия', sub: C.qty(r.qty) + ' ' + (r.unit || '') + ' × ' + C.money(c.unitPrice) + ' = ' + C.money(c.total) + ' руб.' +
             (was ? ' · по договору было: ' + C.qty(was.qty) + ' × ' + C.money(C.num(was.priceWork) + C.num(was.priceMat)) + ' = ' + C.money(C.smetaRow(was).total) : ''),
           badges: [ds ? { t: 'ДС № ' + (ds.no || '—'), c: 'ok' } : null, ex ? { t: 'исключена по ДС № ' + (ex.no || '—'), c: 'warn' } : null,
@@ -1676,14 +1678,16 @@
         return g;
       };
       // показ по разделам: договор, затем каждое ДС (как в печатной смете)
-      const grpIdx = x => C.dsList(P).findIndex(d => d.id === x.dsId) + 1;
+      // позиции ДС с новой редакцией расчёта — в разделе договора, по номерам этого расчёта
+      const grpIdx = x => { const d = C.rowDs(P, x); return d ? C.dsList(P).indexOf(d) + 1 : 0; };
+      const noKey = (x, i) => { if (grpIdx(x) || !C.dsEdition(P)) return i; const n = parseFloat(String(x.no || '').replace(',', '.')); return isNaN(n) ? 1e9 + i : n; };
       const smetaCtl = collection(c, 'smeta', () => P.smeta, {
         noSearch: true, addLabel: '+ Позиция', lead: [ksLbl, sp, allBtn, clrBtn], after: updAll,
-        order: items => items.map((x, i) => [x, i]).sort((a, b) => grpIdx(a[0]) - grpIdx(b[0]) || a[1] - b[1]).map(x => x[0]),
+        order: items => items.map((x, i) => [x, i]).sort((a, b) => grpIdx(a[0]) - grpIdx(b[0]) || noKey(a[0], a[1]) - noKey(b[0], b[1]) || a[1] - b[1]).map(x => x[0]),
         section: x => {
           if (!C.dsList(P).length) return '';
-          const d = C.dsById(P, x.dsId), st = P.settings;
-          return d ? 'Дополнительные работы по ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : '') : 'Работы по договору № ' + (st.contractNo || '—') + (st.contractDate ? ' от ' + C.fmtDate(st.contractDate) : '');
+          const d = C.rowDs(P, x);
+          return d ? 'Дополнительные работы по ДС № ' + (d.no || '—') + (d.date ? ' от ' + C.fmtDate(d.date) : '') : C.contractWorksLabel(P);
         },
         extra: posGrid,
         // отменить последнее изменение позиции по ДС — вернуть прежние количество и цены

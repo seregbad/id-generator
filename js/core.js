@@ -532,13 +532,34 @@
     dsList(p).forEach(d => { if (d.startDate) start = d.startDate; if (d.endDate) end = d.endDate; });
     return { start, end };
   }
-  // позиции сметы: исключённые по ДС не участвуют; порядок — договор, затем ДС по датам (сквозная нумерация)
+  // ДС с новой редакцией всего расчёта стоимости (d.fullCalc): его позиции — это основные работы договора
+  // «в редакции ДС», а не отдельный раздел доп. работ; номера позиций в КС — по этому расчёту
+  const dsEdition = (p, upTo) => dsList(p).filter(d => d.fullCalc && (!upTo || !d.date || d.date <= upTo)).pop() || null;
+  // ДС, к разделу которого относится позиция (null — основные работы, в т.ч. по новой редакции расчёта)
+  const rowDs = (p, r) => { const d = r && r.dsId ? dsById(p, r.dsId) : null; return d && !d.fullCalc ? d : null; };
+  // «Работы по договору № … от … (в редакции ДС № 2 от …)»
+  function contractWorksLabel(p, upTo) {
+    const st = p.settings, ed = dsEdition(p, upTo);
+    return 'Работы по договору № ' + s(st.contractNo) + (st.contractDate ? ' от ' + fmtDate(st.contractDate) : '') +
+      (ed ? ' (в редакции дополнительного соглашения № ' + s(ed.no || '—') + (ed.date ? ' от ' + fmtDate(ed.date) : '') + ')' : '');
+  }
+  // номер позиции в документе, где она согласована: в расчёте договора (или его новой редакции по ДС) либо в расчёте своего ДС.
+  // Задаётся при загрузке (r.no); если не задан — по порядку среди позиций того же основания
+  function smetaNo(p, r) {
+    if (s(r.no)) return s(r.no);
+    const basis = x => (x.dsId && dsById(p, x.dsId) ? x.dsId : '');
+    const same = p.smeta.filter(x => x.name && basis(x) === basis(r));
+    return String(same.indexOf(r) + 1);
+  }
+  // позиции сметы: исключённые по ДС не участвуют; порядок — договор, затем ДС по датам
   function smetaGroups(p) {
     const ds = dsList(p), ids = ds.map(d => d.id);
     // исключена только по существующему ДС (если ДС удалили — позиция снова действует)
     const rows = p.smeta.filter(r => r.name && !(r.excludedBy && ids.includes(r.excludedBy)));
-    const main = rows.filter(r => !r.dsId || !ids.includes(r.dsId));
-    return [{ ds: null, rows: main }].concat(ds.map(d => ({ ds: d, rows: rows.filter(r => r.dsId === d.id) })));
+    let main = rows.filter(r => !rowDs(p, r));
+    // новая редакция расчёта — в порядке её номеров
+    if (dsEdition(p)) main = main.map((r, i) => ({ r, i, n: parseFloat(String(r.no || '').replace(',', '.')) })).sort((a, b) => (isNaN(a.n) ? 1e9 : a.n) - (isNaN(b.n) ? 1e9 : b.n) || a.i - b.i).map(x => x.r);
+    return [{ ds: null, rows: main }].concat(ds.filter(d => !d.fullCalc).map(d => ({ ds: d, rows: rows.filter(r => r.dsId === d.id) })));
   }
   const smetaOrdered = p => smetaGroups(p).flatMap(g => g.rows);
   const smetaRows = (p, worksOnly) => smetaOrdered(p).filter(r => !worksOnly || num(r.priceWork));
@@ -570,13 +591,13 @@
   function inKsScope(p, r) {
     if (!ksSeparate(p)) return true;
     const d = ksScopeDs(p);
-    return d ? r.dsId === d.id : !(r.dsId && dsById(p, r.dsId));
+    return d ? (d.fullCalc ? !rowDs(p, r) : r.dsId === d.id) : !rowDs(p, r);
   }
   function ksItems(p) {
     const wo = !!p.ks.worksOnly, pm = ksPeriodMode(p);
     return smetaRows(p, wo).filter(r => inKsScope(p, r) && (!pm || num(r.qtyNow))).map(r => {
       const qty = pm ? r.qtyNow : r.qty;
-      const d = dsById(p, r.dsId);
+      const d = rowDs(p, r);
       return { r, qty, ds: d, c: smetaRow(Object.assign({}, r, { qty }), wo) };
     });
   }
@@ -595,8 +616,9 @@
   // закрытые КС по текущей области (отдельная КС на договор / ДС считает только свои позиции); group — ДС id или '' (договор)
   function ksBeforeScoped(p, onlyYear, group) {
     const y = (parseDate(p.ks.date) || new Date()).getFullYear();
-    const grpOf = id => { const r = p.smeta.find(x => x.id === id); return r && r.dsId && dsById(p, r.dsId) ? r.dsId : ''; };
-    const want = group !== undefined ? group : ksSeparate(p) ? (ksScopeDs(p) ? ksScopeDs(p).id : '') : null;
+    const grpOf = id => { const d = rowDs(p, p.smeta.find(x => x.id === id)); return d ? d.id : ''; };
+    const sd = ksScopeDs(p);
+    const want = group !== undefined ? group : ksSeparate(p) ? (sd && !sd.fullCalc ? sd.id : '') : null;
     return round2((p.ksHistory || []).filter(h => !onlyYear || (parseDate(h.date) || new Date(0)).getFullYear() === y)
       .reduce((a, h) => a + (want === null ? num(h.total) : (h.rows || []).filter(x => grpOf(x.id) === want).reduce((b, x) => b + num(x.sum), 0)), 0));
   }
@@ -744,6 +766,6 @@
     matNo, matName, matLabel, matDocs, matText, matUntil, matExpired,
     workLabel, actNumber, actView, parties, smetaRow, smetaRows, smetaTotals,
     ksPeriodMode, ksItems, ksTotals, vatSplit, netOf, vatTop,
-    schemeLabel, rdSheets, sheetsText, sheetsParse, importIssues, compactCode, unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
+    schemeLabel, rdSheets, sheetsText, sheetsParse, importIssues, compactCode, unitNorm, dsList, dsById, dsLabel, contractPriceNow, workDates, dsEdition, rowDs, contractWorksLabel, smetaNo, smetaGroups, smetaOrdered, ksSeparate, ksScopeDs, ksBeforeScoped, ksDoneBefore, ksYearBefore, qtyDoneBefore, projectCheck, materialBalance
   };
 })(typeof window !== 'undefined' ? window : globalThis);

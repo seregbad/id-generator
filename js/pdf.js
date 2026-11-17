@@ -711,7 +711,7 @@
     const groups = C.smetaGroups(p).filter(g => g.rows.length);
     const sections = groups.some(g => g.ds);
     groups.forEach(g => {
-      if (sections) body.push([{ text: g.ds ? dsHead(g.ds) : 'Работы по договору № ' + s(st.contractNo) + (st.contractDate ? ' от ' + C.fmtDate(st.contractDate) : ''), colSpan: 9, bold: true, italics: true }, {}, {}, {}, {}, {}, {}, {}, {}]);
+      if (sections) body.push([{ text: g.ds ? dsHead(g.ds) : C.contractWorksLabel(p), colSpan: 9, bold: true, italics: true }, {}, {}, {}, {}, {}, {}, {}, {}]);
       let sum = 0, sw = 0, sm = 0;
       g.rows.forEach(r => {
         const c = C.smetaRow(r); n++; sum += c.total; sw += c.work; sm += c.mat;
@@ -825,8 +825,6 @@
       ['по порядку', 'позиции по смете', {}, {}, {}, 'количество', 'цена за единицу, руб.' + (ks.ks2Style !== 'smeta' ? ' (без НДС)' : ''), 'стоимость, руб.' + (ks.ks2Style !== 'smeta' ? ' (без НДС)' : '')],
       nums(8)
     ].map((r, i) => i < 2 ? r.map(c => typeof c === 'string' ? { text: c, bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' } : (c.text !== undefined ? Object.assign({ bold: true, alignment: 'center', fontSize: 8, fillColor: '#f0f0f0' }, c) : c)) : r);
-    // сквозная нумерация позиций: договор, затем доп. соглашения
-    const all = C.smetaOrdered(p);
     const items = C.ksItems(p);
     // «как в КС-3» (по умолчанию): цена и стоимость без НДС, внизу «Итого», «Сумма НДС», «Всего с учетом НДС» — итоги совпадают с КС-3.
     // «как в смете» (ks.ks2Style = 'smeta'): в ценах сметы
@@ -846,10 +844,10 @@
       const g = ds ? ds.id : '';
       if (sectioned && g !== curGroup) {
         curGroup = g;
-        body.push([{ text: ds ? dsHead(ds) : 'Работы по договору № ' + s(p.settings.contractNo) + (p.settings.contractDate ? ' от ' + C.fmtDate(p.settings.contractDate) : ''), colSpan: 8, bold: true, italics: true }, {}, {}, {}, {}, {}, {}, {}]);
+        body.push([{ text: ds ? dsHead(ds) : C.contractWorksLabel(p, ks.date || ks.periodTo), colSpan: 8, bold: true, italics: true }, {}, {}, {}, {}, {}, {}, {}]);
       }
-      // «позиция по смете» — номер строки в полной смете, даже если в КС вошли не все позиции
-      body.push([{ text: String(i + 1), alignment: 'center' }, { text: String(all.indexOf(r) + 1), alignment: 'center' }, s(r.name), { text: 'договорн.', alignment: 'center' }, { text: C.unitNorm(r.unit), alignment: 'center' }, R(C.qty(qty)), R(C.money(unit)), R(C.money(sums[i]))]);
+      // «позиция по смете» — номер в том расчёте, где позиция согласована (договор / его редакция по ДС / расчёт ДС)
+      body.push([{ text: String(i + 1), alignment: 'center' }, { text: C.smetaNo(p, r), alignment: 'center' }, s(r.name), { text: 'договорн.', alignment: 'center' }, { text: C.unitNorm(r.unit), alignment: 'center' }, R(C.qty(qty)), R(C.money(unit)), R(C.money(sums[i]))]);
     });
     // итоги — как в КС-3: под таблицей справа, ровно под столбцом «стоимость»
     const tl = asKs3 ? [['Итого', tot.net], ['Сумма НДС ' + tot.vatPct + '%', tot.vatSum], ['Всего с учетом НДС', tot.gross]]
@@ -898,7 +896,7 @@
     // (отдельная КС по договору / ДС — только закрытые КС этой же области)
     const fromStart = net(C.ksBeforeScoped(p, false) + tot.total), fromYear = net(C.ksBeforeScoped(p, true) + tot.total), period = tot.net;
     const items = C.ksItems(p);
-    const contractLbl = 'Работы по договору № ' + s(p.settings.contractNo) + (p.settings.contractDate ? ' от ' + C.fmtDate(p.settings.contractDate) : '');
+    const contractLbl = C.contractWorksLabel(p, ks.date || ks.periodTo);
     const groupLbl = ds => ds ? dsHead(ds) : (s(ks.stageName) || contractLbl);
     // одна КС на договор и ДС — этапы: «Работы по договору», «Доп. работы по ДС № …»
     const sectioned = !C.ksSeparate(p) && (p.supplements || []).length > 0 &&
@@ -928,9 +926,9 @@
         .reduce((a, h) => a + (h.rows || []).filter(x => x.id === id).reduce((b, x) => b + C.num(x.sum), 0), 0);
       // плюс позиции, закрытые в прошлых КС и не предъявляемые сейчас: они входят в «с начала работ» (за период — 0)
       const sd = C.ksScopeDs(p);
-      const inScope = r => !C.ksSeparate(p) || (sd ? r.dsId === sd.id : !(r.dsId && C.dsById(p, r.dsId)));
+      const inScope = r => !C.ksSeparate(p) || (sd && !sd.fullCalc ? r.dsId === sd.id : !C.rowDs(p, r));
       const rowsAll = C.smetaOrdered(p).filter(r => inScope(r) && (items.some(x => x.r === r) || before(r.id)))
-        .map(r => items.find(x => x.r === r) || { r, ds: C.dsById(p, r.dsId), c: { total: 0 } });
+        .map(r => items.find(x => x.r === r) || { r, ds: C.rowDs(p, r), c: { total: 0 } });
       const cols = fitCols(rowsAll.map(({ r, c }) => [net(before(r.id) + c.total), net(before(r.id, true) + c.total), net(c.total)]));
       let cur = null;
       rowsAll.forEach(({ r, ds }, i) => {
@@ -940,7 +938,7 @@
       });
     } else if (sectioned) {
       // этап на договор и на каждое ДС, по которому уже есть или сейчас предъявляются работы
-      const groups = [null].concat(C.dsList(p)).filter(d => !d || items.some(x => x.ds && x.ds.id === d.id) || C.ksBeforeScoped(p, false, d.id));
+      const groups = [null].concat(C.dsList(p).filter(d => !d.fullCalc)).filter(d => !d || items.some(x => x.ds && x.ds.id === d.id) || C.ksBeforeScoped(p, false, d.id));
       const cols = fitCols(groups.map(d => {
         const g = d ? d.id : '';
         const now = items.filter(x => (x.ds ? x.ds.id : '') === g).reduce((a, x) => a + x.c.total, 0);
@@ -949,7 +947,7 @@
       groups.forEach((d, i) => body.push([{ text: String(i + 1), alignment: 'center' }, groupLbl(d), '', R(C.money(cols[i][0])), R(C.money(cols[i][1])), R(C.money(cols[i][2]))]));
     } else {
       const sd = C.ksScopeDs(p);
-      body.push([{ text: '1', alignment: 'center' }, sd ? groupLbl(sd) : (s(ks.stageName) || 'Работы по договору № ' + s(p.settings.contractNo)), '', R(C.money(fromStart)), R(C.money(fromYear)), R(C.money(period))]);
+      body.push([{ text: '1', alignment: 'center' }, sd && !sd.fullCalc ? groupLbl(sd) : (s(ks.stageName) || contractLbl), '', R(C.money(fromStart)), R(C.money(fromYear)), R(C.money(period))]);
     }
     // как в бланке: «Итого», «Сумма НДС», «Всего с учетом НДС» — под таблицей справа, под графой отчётного периода
     // продолжение той же таблицы: подпись без рамок, сумма — в рамке под графой отчётного периода
