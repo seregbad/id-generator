@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '61 (17.11.2026)';
+  const APP_VERSION = '63 (17.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -33,6 +33,7 @@
     setSaveState('…');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
+      saveTimer = null;
       try {
         localStorage.setItem(STORE_KEY, JSON.stringify(store));
         setSaveState('Сохранено');
@@ -45,6 +46,38 @@
     updateHeader();
   }
   function setSaveState(t) { $('#saveState').textContent = t; }
+  // закрывают окно сразу после правки — дописать несохранённое немедленно (обычно запись идёт через 0,3 с)
+  function flushSave() {
+    if (!saveTimer) return;
+    clearTimeout(saveTimer); saveTimer = null;
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); setSaveState('Сохранено'); document.dispatchEvent(new Event('idgen-saved')); } catch (e) { setSaveState('Не сохранено!'); }
+  }
+  window.addEventListener('pagehide', flushSave);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave(); });
+  // открытая карточка с несохранёнными правками — переспросить при закрытии окна
+  let editorDirty = false;
+  window.addEventListener('beforeunload', e => {
+    flushSave();
+    if (editorDirty && $('#dlg').open) { e.preventDefault(); e.returnValue = ''; }
+  });
+  // приложение открыто в двух окнах / вкладках: другое окно сохранило данные — берём их,
+  // иначе это окно при следующем сохранении затрёт их своей старой копией
+  window.addEventListener('storage', e => {
+    if (e.key !== STORE_KEY || !e.newValue || saveTimer) return; // здесь есть свои несохранённые правки — они запишутся и уйдут в то окно
+    try {
+      const ns = JSON.parse(e.newValue);
+      if (!ns || !ns.projects) return;
+      Object.keys(ns.projects).forEach(id => { ns.projects[id] = C.normalize(ns.projects[id]); });
+      const cur = P && P.id;
+      store = ns;
+      if (cur && store.projects[cur]) store.current = cur;
+      else if (!store.projects[store.current]) store.current = Object.keys(store.projects)[0];
+      if (!store.current) return;
+      P = store.projects[store.current];
+      if ($('#dlg').open) { closeDialog(); toast('Данные изменили в другом окне приложения — карточка закрыта, откройте её заново'); }
+      render(); updateHeader();
+    } catch (err) { /* не JSON — пропускаем */ }
+  });
   function projTitle(p) {
     const s = p.settings;
     return (s.shortName ? s.shortName + ' — ' : '') + (s.objectName || 'Без названия') + (s.contractNo ? ' · дог. ' + s.contractNo : '');
@@ -113,7 +146,7 @@
     body.scrollTop = 0;
   }
   function closeDialog() { if (dlg.open) dlg.close(); }
-  dlg.addEventListener('close', () => { const f = dlgOnClose; dlgOnClose = null; if (f) f(); });
+  dlg.addEventListener('close', () => { editorDirty = false; const f = dlgOnClose; dlgOnClose = null; if (f) f(); });
   $('#dlgClose').addEventListener('click', closeDialog);
   $('#dlgForm').addEventListener('submit', e => e.preventDefault());
 
@@ -469,7 +502,7 @@
         F('section', 'Раздел', 'combo', { req: 1, opts: () => P.lists.sections, hint: 'Как в поле «Раздел» видов работ и актов: КЖ, КМ, АР…' }),
         F('stage', 'Стадия', 'select', { opts: [{ v: 'П', l: 'П — проектная документация' }], empty: 'Р — рабочая документация (по умолчанию)' }),
         F('code', 'Шифр', 'text', { req: 1, hint: 'Как в штампе, например 038-2024-КЖ0' }),
-        F('docName', 'Наименование раздела', 'text', { wide: 1, ph: P.settings.projectDocName || '', hint: 'Например: Рабочая документация. Конструкции железобетонные. Пусто — наименование из «Договора и доп. соглашений»' }),
+        F('docName', 'Наименование раздела', 'combo', { wide: 1, ph: P.settings.projectDocName || '', opts: () => rdNameOpts(r), hint: 'Выберите из списка (▾) или впишите своё. Пусто — наименование из «Договора и доп. соглашений»' }),
         F('designerKey', 'Проектировщик раздела', 'select', { opts: orgKeys, empty: 'Проектировщик объекта' + (C.designerOrg(P) ? ': ' + C.designerOrg(P).key : ''), hint: 'Если раздел разрабатывала другая организация' }),
         F('sheetListText', r && r.stage === 'П' ? 'Тома / разделы' : 'Листы (по строке: «№ — наименование»)', 'textarea', { wide: 1, hint: 'Заполняется при загрузке РД (ведомость рабочих чертежей или штампы). В акте листы выбираются галочками' })
       ];
@@ -601,6 +634,33 @@
   function optList(f) {
     const raw = typeof f.opts === 'function' ? f.opts() : (f.opts || []);
     return raw.map(o => typeof o === 'object' ? o : { v: o, l: o });
+  }
+  // типовые наименования разделов (марки основных комплектов по ГОСТ Р 21.101)
+  const RD_NAMES = [
+    ['ГП', 'Генеральный план'], ['АР', 'Архитектурные решения'], ['АС', 'Архитектурно-строительные решения'],
+    ['КЖ', 'Конструкции железобетонные'], ['КЖ0', 'Конструкции железобетонные. Фундаменты'], ['КМ', 'Конструкции металлические'],
+    ['КМД', 'Конструкции металлические деталировочные'], ['КД', 'Конструкции деревянные'], ['КР', 'Конструктивные решения'],
+    ['ОВ', 'Отопление, вентиляция и кондиционирование воздуха'], ['ТМ', 'Тепломеханические решения'], ['ВК', 'Внутренние системы водоснабжения и канализации'],
+    ['НВК', 'Наружные сети водоснабжения и канализации'], ['НВ', 'Наружные сети водоснабжения'], ['НК', 'Наружные сети канализации'],
+    ['ТС', 'Тепловые сети'], ['ГСН', 'Газоснабжение. Наружные газопроводы'], ['ГСВ', 'Газоснабжение. Внутренние устройства'],
+    ['ЭМ', 'Силовое электрооборудование'], ['ЭО', 'Электрическое освещение (внутреннее)'], ['ЭН', 'Электрическое освещение наружное'],
+    ['ЭС', 'Электроснабжение'], ['ЭОМ', 'Силовое электрооборудование и электроосвещение'], ['ЭСН', 'Наружные сети электроснабжения'],
+    ['СС', 'Системы связи'], ['СКС', 'Структурированные кабельные системы'], ['ПС', 'Пожарная сигнализация'], ['АПС', 'Автоматическая пожарная сигнализация'],
+    ['СОУЭ', 'Система оповещения и управления эвакуацией'], ['АПТ', 'Автоматическое пожаротушение'], ['АОВ', 'Автоматизация отопления и вентиляции'],
+    ['АК', 'Комплексная автоматизация'], ['ТХ', 'Технологические решения'], ['АД', 'Автомобильные дороги'], ['ПЗ', 'Пояснительная записка'],
+    ['ПОС', 'Проект организации строительства'], ['ГР', 'Гидротехнические решения'], ['ВР', 'Внутриплощадочные инженерные сети']
+  ];
+  function rdNameOpts(r) {
+    const pre = r && r.stage === 'П' ? 'Проектная документация. ' : 'Рабочая документация. ';
+    const sec = String((r && r.section) || '').trim().toUpperCase();
+    const out = [], seen = new Set();
+    const add = (v, l) => { v = String(v || '').trim(); if (!v || seen.has(v)) return; seen.add(v); out.push({ v, l: l || v }); };
+    // сначала — по выбранному разделу, затем уже использованные в проекте, затем все типовые
+    RD_NAMES.filter(([m]) => sec && (m === sec || sec.startsWith(m) || m.startsWith(sec))).forEach(([m, n]) => add(pre + n, m + ' — ' + pre + n));
+    if (P.settings.projectDocName) add(P.settings.projectDocName);
+    P.rdSections.forEach(x => { if (x !== r) add(x.docName); });
+    RD_NAMES.forEach(([m, n]) => add(pre + n, m + ' — ' + pre + n));
+    return out;
   }
   // поле «выбрать из списка или вписать своё»: по кнопке ▾ показывает ВСЕ варианты, при вводе — подходящие
   function comboEl(f, value) {
@@ -795,8 +855,9 @@
     const body = document.createElement('div');
     let openSecs = null; // раскрытые разделы карточки — сохраняются при перерисовке
     let heads = [];      // заголовки разделов — обновляются при вводе (кратко, отметка)
+    editorDirty = false;
     const onField = (ff, val, rerender) => {
-      work[ff.k] = val;
+      work[ff.k] = val; editorDirty = true;
       if (sc.onChange) sc.onChange(work, ff.k);
       if (ff.rerender && (rerender || ff.t === 'select')) { const top = $('#dlgBody').scrollTop; draw(); $('#dlgBody').scrollTop = top; }
       else { if (sc.preview) updPrev(); updHeads(); }
@@ -2514,7 +2575,11 @@
     putProject(p) {
       p = C.normalize(p);
       store.projects[p.id] = p;
-      if (P && P.id === p.id) { P = p; render(); updateHeader(); }
+      if (P && P.id === p.id) {
+        // открытая карточка держит старую копию — закрываем, чтобы правки не ушли «в никуда»
+        if ($('#dlg').open) { closeDialog(); toast('Проект обновлён с другого устройства — откройте карточку заново'); }
+        P = p; render(); updateHeader();
+      }
       saveStore();
     },
     removeProject(id) {

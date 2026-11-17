@@ -36,6 +36,9 @@
   // ---------- синхронизация ----------
   async function syncNow(manual) {
     if (running) { again = true; return running; }
+    // открыта карточка (акт, материал…) — не подменяем проект под ней, повторим позже
+    const dlg = document.getElementById('dlg');
+    if (!manual && dlg && dlg.open) { schedule(10000); return; }
     running = (async () => {
       const c = cfg();
       if (!c.url || !c.key) return;
@@ -47,11 +50,16 @@
         const list = await call('list');
         const srv = {}; list.forEach(x => { srv[x.id] = x; });
         const put = async (p, base, force) => {
-          const r = await call('put', { project: p, base, force: !!force });
-          st[p.id] = { server: r.updatedAt, local: p.updatedAt || '' }; log.up++;
+          // отметка правки — на момент отправки: правки во время отправки уйдут следующей синхронизацией
+          const at = p.updatedAt || '';
+          const r = await call('put', { project: JSON.parse(JSON.stringify(p)), base, force: !!force });
+          st[p.id] = { server: r.updatedAt, local: at }; log.up++;
         };
-        const get = async id => {
+        const get = async (id, copied) => {
           const r = await call('get', { id });
+          // версия этого устройства уходит в «Историю версий» до замены — если с сервера пришло не то, её можно вернуть
+          const old = IDApp.store().projects[id];
+          if (old && !copied && JSON.stringify(old) !== JSON.stringify(r.project)) keepCopy(old, 'версия с этого устройства до загрузки с сервера');
           IDApp.putProject(r.project);
           st[id] = { server: r.updatedAt, local: r.project.updatedAt || '' }; log.down++;
           return r.project;
@@ -72,7 +80,7 @@
           if (!my) {                                                            // первая встреча (например, перенесли файлом)
             if ((p.updatedAt || '') === (s.projectUpdatedAt || '')) st[p.id] = { server: s.updatedAt, local: p.updatedAt || '' };
             else if ((p.updatedAt || '') > (s.projectUpdatedAt || '')) await put(p, s.updatedAt);
-            else { keepCopy(p, 'версия с этого устройства до синхронизации'); await get(p.id); }
+            else { keepCopy(p, 'версия с этого устройства до синхронизации'); await get(p.id, true); }
             continue;
           }
           if (localChanged && !serverChanged) await put(p, my.server);
@@ -86,7 +94,7 @@
               log.conflicts.push(t + ' — оставлена версия с этого устройства');
             } else {
               keepCopy(p, 'версия с этого устройства (конфликт)');
-              await get(p.id);
+              await get(p.id, true);
               log.conflicts.push(t + ' — оставлена более свежая версия с другого устройства');
             }
           }
