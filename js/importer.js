@@ -1430,6 +1430,50 @@
   }
 
   // ---------- офлайн: поиск по шаблонам в тексте ----------
+  // карточка организации (выписка ЕГРЮЛ, сайты-справочники: «ОГРН … ИНН/КПП … Юридический адрес … Руководитель … Коды статистики»).
+  // Скрин часто в две колонки — OCR склеивает строки колонок, поэтому значения ищем рядом с подписями и обрезаем по соседней колонке
+  function orgCardParse(t) {
+    if (!/ОГРН/.test(t) || !/ИНН/.test(t)) return null;
+    if (!/(юридическ[а-я]*\s+адрес|руководител|коды\s+статистики|дата\s+регистрации|уставный\s+капитал|вид\s+деятельности|ОКВЭД|ОКПО)/i.test(t)) return null;
+    if (/именуем|предмет\s+договора|освидетельствовани|сертификат\s+соответствия|декларац[а-яё]*\s+о\s+соответствии/i.test(t.slice(0, 4000))) return null;
+    const ogrn = (/ОГРН(?:ИП)?[^\d\n]{0,40}\n?[^\d\n]{0,40}?\b(\d{15}|\d{13})\b/.exec(t) || [])[1] || ((t.match(/\b\d{13}\b|\b\d{15}\b/g) || [])[0] || '');
+    let inn = (/ИНН\s*(?:\/\s*КПП)?\s*:?\s*(\d{12}|\d{10})\b/.exec(t) || [])[1] || '';
+    const ii = t.search(/ИНН/);
+    const near = t.slice(ii, ii + 250);
+    if (!inn) inn = (near.match(/\b\d{12}\b|\b\d{10}\b/g) || []).find(n => n !== ogrn) || '';
+    if (!inn) return null;
+    const kpp = (/КПП\s*:?\s*(\d{9})\b/.exec(t) || [])[1] || (near.match(/\b\d{9}\b/g) || [])[0] || '';
+    const okpo = (/ОКПО\s*:?\s*(\d{8,10})\b/.exec(t) || [])[1] || '';
+    // наименование, если есть на скрине: «ООО «Название»» или «Полное наименование …»
+    const nm = /(ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]([^»"\n]{2,80})[»"]/.exec(t) || /полное\s+наименование\s*:?\s*\n?\s*([^\n]{5,200})/i.exec(t);
+    const name = nm ? (nm.length > 2 ? nm[1] + ' «' + str(nm[2]) + '»' : str(nm[1])) : '';
+    // адрес: строка с индексом после «Юридический адрес» / «Адрес»; правую колонку (налоговый орган и т. п.) отрезаем
+    let address = '';
+    const ai = t.search(/(юридическ[а-я]*\s+адрес|адрес\s+(?:регистрации|местонахождения|организации)|(?:^|\n)\s*адрес\b)/i);
+    if (ai >= 0) {
+      const m = /\b\d{6}\b[^\n]*/.exec(t.slice(ai, ai + 400));
+      if (m) {
+        address = m[0].split(/\s+(?=Межрайонн|Инспекци|ИФНС|Управлени[ея]\s+Ф|Еще\s+\d|Ещё\s+\d|с\s+\d{1,2}\s+[а-яё]+\s+\d{4}|Налогов)/)[0];
+        // OCR ставит точки вместо запятых: «195112. город Санкт-Петербург. пр-кт…»
+        address = address.replace(/^(\d{6})[.,]?\s+/, '$1, ').replace(/(город\s+[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)*)\.\s+/, '$1, ').replace(/(\d)-H\b/g, '$1-н').replace(/[.,\s]+$/, '');
+      }
+    }
+    // руководитель: должность — строкой ниже подписи, ФИО — следующей строкой
+    let headName = '', headPos = '';
+    const ri = t.search(/руководител/i);
+    if (ri >= 0) {
+      const lines = t.slice(ri).split('\n').slice(1, 5);
+      lines.forEach(l => {
+        const pos = /^\s*((?:генеральный\s+|исполнительный\s+)?директор|президент|управляющ[а-яё]+|руководитель|председатель[^\n]{0,30}?|индивидуальный\s+предприниматель)(?![а-яё])/i.exec(l);
+        if (pos && !headPos) headPos = pos[1].replace(/^./, c => c.toUpperCase());
+        const fio = /^\s*([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:вич|вна|чна|ична|оглы|кызы))(?![а-яё])/.exec(l);
+        if (fio && !headName) headName = fio[1];
+      });
+    }
+    const ip = ogrn.length === 15 || /^ИП\b/.test(name);
+    return { org: { role: 'other', type: ip ? 'ИП' : 'ЮЛ', name, ogrn, inn, kpp, address, phone: '', okpo, sro_name: '', sro_ogrn: '', sro_inn: '' }, head: headName ? { full_name: headName, position: headPos, auth_doc: '', org_name: name, org_inn: inn } : null };
+  }
+
   function offlineParse(text, layout, fname) {
     const r = emptyResult();
     text = fixOcr(text);
@@ -1486,6 +1530,13 @@
       r.doc_kind = 'supplement'; r.supplement = sup;
       r.summary = 'Доп. соглашение № ' + (sup.no || '—') + (sup.date ? ' от ' + C.fmtDate(sup.date) : '');
       if (layout) invoiceTable(layout).filter(row => !ADVANCE_RE.test(row.name)).forEach(row => r.estimate.push({ name: row.name, unit: row.unit, qty: String(row.qty), price_work: String(row.price), price_mat: '' }));
+      return r;
+    }
+    // карточка организации — реквизиты одной организации и её руководитель
+    const oc = orgCardParse(t);
+    if (oc) {
+      r.doc_kind = 'org'; r.organizations.push(oc.org); if (oc.head) r.people.push(oc.head);
+      r.summary = 'Карточка организации' + (oc.org.name ? ': ' + oc.org.name : '') + ' · ИНН ' + oc.org.inn + (oc.org.ogrn ? ', ОГРН ' + oc.org.ogrn : '');
       return r;
     }
     const fn = fromFileName(fname || '');
@@ -2055,8 +2106,9 @@
     }
     // организации (заказчик, подрядчик, проектировщик и прочие участники; поставщики и изготовители идут в материалы)
     (res.organizations || []).forEach(o => {
-      if (!o.name || o.role === 'supplier' || o.role === 'manufacturer') return;
-      const ex = P.orgs.find(x => (o.inn && x.inn === o.inn) || norm(x.name) === norm(o.name));
+      // без названия (карточка организации со скрина) — только если есть ИНН: находим по нему или просим вписать название
+      if ((!o.name && !o.inn) || o.role === 'supplier' || o.role === 'manufacturer') return;
+      const ex = P.orgs.find(x => (o.inn && x.inn === o.inn) || (o.name && norm(x.name) === norm(o.name)));
       const map = { type: o.type, name: o.name, ogrn: o.ogrn, inn: o.inn, address: o.address, phone: o.phone, okpo: o.okpo, sroName: o.sro_name, sroOgrn: o.sro_ogrn, sroInn: o.sro_inn };
       if (ex) {
         const upd = {};
@@ -2069,10 +2121,13 @@
       }
       const data = Object.assign({ key: orgKeyFromName(o.name), role: ROLE_MAP[o.role] || '' }, Object.fromEntries(Object.entries(map).map(([k, v]) => [k, str(v)])));
       if (!data.type) data.type = 'ЮЛ';
+      const card = res.doc_kind === 'org'; // загрузили именно карточку этой организации — сразу отмечено
       out.push({
-        kind: 'Организации', title: 'Добавить организацию: ' + o.name, checked: !!ROLE_MAP[o.role], data, srcOrg: o,
-        fields: [F('key', 'Ключ (краткое имя)'), F('role', 'Роль в проекте', 'orgRole'), F('name', 'Наименование'), F('inn', 'ИНН'), F('ogrn', 'ОГРН'), F('address', 'Адрес'), F('phone', 'Телефон'), F('okpo', 'ОКПО'), F('sroName', 'СРО')],
-        apply: d => P.orgs.push(Object.assign({ id: C.uid() }, d))
+        kind: 'Организации', title: 'Добавить организацию: ' + (o.name || 'ИНН ' + o.inn + ' — впишите наименование'), checked: card || !!ROLE_MAP[o.role], data, srcOrg: o,
+        titleOf: d => 'Добавить организацию: ' + (d.name || 'ИНН ' + d.inn + ' — впишите наименование'),
+        fields: [F('key', 'Ключ (краткое имя)'), F('role', 'Роль в проекте', 'orgRole'), F('name', 'Наименование' + (o.name ? '' : ' (на скрине его нет — впишите)')), F('inn', 'ИНН'), F('ogrn', 'ОГРН'), F('address', 'Адрес'), F('phone', 'Телефон'), F('okpo', 'ОКПО'), F('sroName', 'СРО')],
+        valid: d => !str(d.name) ? 'впишите наименование организации' : (d.key && P.orgs.some(x => x.key === d.key) ? 'ключ «' + d.key + '» уже занят' : ''),
+        apply: d => { if (!str(d.key)) d.key = orgKeyFromName(d.name); P.orgs.push(Object.assign({ id: C.uid() }, d)); }
       });
     });
     // подписанты КС-2 / КС-3 из блока подписей договора
@@ -2092,13 +2147,19 @@
     // представители
     (res.people || []).forEach(h => {
       if (!h.full_name || P.people.some(x => norm(x.fullName) === norm(h.full_name))) return;
-      const org = P.orgs.find(x => h.org_name && (norm(x.name) === norm(h.org_name) || norm(h.org_name).includes(norm(x.key))));
+      const org = P.orgs.find(x => (h.org_inn && x.inn === h.org_inn) || (h.org_name && (norm(x.name) === norm(h.org_name) || norm(h.org_name).includes(norm(x.key)))));
+      // организация ещё не заведена (добавляется этой же загрузкой) — ключ подставится при принятии
+      const orgLater = !org && h.org_inn ? h.org_inn : '';
       out.push({
         kind: 'Представители', title: 'Добавить представителя: ' + h.full_name + (h.position ? ', ' + h.position : ''), checked: false,
-        data: { role: '', orgKey: org ? org.key : '', fullName: str(h.full_name), position: str(h.position), authDoc: str(h.auth_doc), from: '' },
+        data: { role: '', orgKey: org ? org.key : '', fullName: str(h.full_name), position: str(h.position), authDoc: str(h.auth_doc), from: '', _orgInn: orgLater },
         fields: [F('role', 'Роль (обязательно)', 'repRole'), F('orgKey', 'Организация (ключ)', 'orgKey'), F('fullName', 'ФИО'), F('position', 'Должность'), F('authDoc', 'Документ о полномочиях'), F('from', 'Действует с', 'date')],
         valid: d => d.role ? '' : 'выберите роль представителя',
-        apply: d => P.people.push(Object.assign({ id: C.uid() }, d))
+        apply: d => {
+          if (d._orgInn && !d.orgKey) { const o = P.orgs.find(x => x.inn === d._orgInn); if (o) d.orgKey = o.key; }
+          delete d._orgInn;
+          P.people.push(Object.assign({ id: C.uid() }, d));
+        }
       });
     });
     // материалы
@@ -3076,7 +3137,11 @@
 
   function applyChecked() {
     let n = 0; const errs = [];
-    if (!queue.some(q => q.proposals.some(p => !p.done && p.checked))) { UI.toast('Ничего не отмечено'); return; }
+    const marked = queue.flatMap(q => q.proposals.filter(p => !p.done && p.checked));
+    if (!marked.length) { UI.toast('Ничего не отмечено'); return; }
+    // всё отмеченное с ошибками (например, не вписано наименование) — сказать, что поправить, без «Отменить»
+    const bad = marked.map(p => p.valid && p.valid(p.data)).filter(Boolean);
+    if (bad.length === marked.length) { UI.toast('Не принято: ' + bad[0]); return; }
     // снимок до изменений — можно откатить в «Проекты и файлы → История версий»
     if (window.IDBackup && queue.some(q => q.proposals.some(p => !p.done && p.checked))) IDBackup.snapshot('перед применением загруженных документов');
     const applied = [];
