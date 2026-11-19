@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '68 (19.11.2026)';
+  const APP_VERSION = '70 (19.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -1660,10 +1660,18 @@
       const ksTotal = document.createElement('div'); ksTotal.className = 'ks-total';
       const drawKsTotal = () => {
         const k = C.ksTotals(P), pm = C.ksPeriodMode(P);
-        ksTotal.innerHTML = (pm ? '' : '<p class="muted small">Объёмы «В этой КС» не заполнены — КС-2 и КС-3 будут на всю смету.</p>') +
+        const closedAll = !pm && P.ksHistory.length && !k.total;
+        ksTotal.innerHTML = (pm ? '' : '<p class="muted small">' + (closedAll ? 'Вся смета закрыта прошлыми КС.' : 'Объёмы «В этой КС» не заполнены — КС-2 и КС-3 будут на ' + (P.ksHistory.length ? 'незакрытый остаток сметы' : 'всю смету') + '.') + '</p>') +
           '<table><tr><td>Итого по ' + esc(ksName('КС')) + ' (без НДС)</td><td class="v">' + C.money(k.net) + '</td></tr>' +
           '<tr><td>Сумма НДС ' + k.vatPct + '%</td><td class="v">' + C.money(k.vatSum) + '</td></tr>' +
           '<tr><td>Всего с учетом НДС</td><td class="v">' + C.money(k.gross) + '</td></tr></table>';
+        // КС подписана — закрыть прямо отсюда (то же, что во вкладке «История КС»)
+        if (k.total) {
+          const tb = document.createElement('div'); tb.className = 'ks-close';
+          tb.appendChild(btn('Закрыть КС № ' + (P.ks.number || '—') + ' и начать следующую', () => closeKs(), 'btn-primary'));
+          const h = document.createElement('small'); h.className = 'muted'; h.textContent = 'Когда КС подписана: объёмы запомнятся, номер увеличится. Ошиблись — «Вернуть в работу» во вкладке «История КС».';
+          tb.appendChild(h); ksTotal.appendChild(tb);
+        }
       };
       const updAll = () => { updKpi(); drawKsLbl(); drawKsTotal(); };
       // разбивка позиции: По смете / Было ранее / Осталось / В этой КС / Сумма

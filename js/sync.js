@@ -132,12 +132,20 @@
   }
 
   // ---------- автоматически ----------
-  let timer = null, lastRun = 0;
+  let timer = null, lastRun = 0, dirty = false; // dirty — есть правки, ещё не отправленные на сервер
   const autoOn = () => { const c = cfg(); return c.url && c.key && c.auto !== false; };
-  function schedule(ms) { if (!autoOn()) return; clearTimeout(timer); timer = setTimeout(() => { lastRun = Date.now(); syncNow(); }, ms); }
-  document.addEventListener('idgen-saved', () => schedule(15000));          // после правок — через 15 с тишины
+  function schedule(ms) { if (!autoOn()) return; clearTimeout(timer); timer = setTimeout(() => { timer = null; lastRun = Date.now(); dirty = false; syncNow(); }, ms); }
+  document.addEventListener('idgen-saved', () => { dirty = true; schedule(8000); }); // после правок — через 8 с тишины
   window.addEventListener('online', () => schedule(1000));
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Date.now() - lastRun > 60000) schedule(500); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { if (Date.now() - lastRun > 20000) schedule(500); }
+    // телефон: приложение свернули сразу после правки — отправляем сейчас, в фоне браузер таймеры усыпляет
+    else if (dirty && autoOn()) { clearTimeout(timer); timer = null; lastRun = Date.now(); dirty = false; syncNow(); }
+  });
+  // ПК: окно может весь день оставаться «видимым» — без правок здесь оно не узнало бы о правках с телефона.
+  // Поэтому при возврате в окно и раз в 2 минуты, пока оно открыто, проверяем сервер
+  window.addEventListener('focus', () => { if (Date.now() - lastRun > 20000) schedule(300); });
+  setInterval(() => { if (document.visibilityState === 'visible' && !timer && Date.now() - lastRun > 120000) schedule(0); }, 30000);
   setTimeout(() => schedule(0), 2500);                                       // при запуске
 
   // ---------- карточка на странице «Проекты и файлы» ----------
@@ -147,7 +155,7 @@
     const box = card('Синхронизация ПК ↔ телефон (Google Диск)', []);
     main.appendChild(box);
     box.appendChild(para(c.url && c.key
-      ? 'Подключено. Проекты сами синхронизируются при запуске, через 15 секунд после правок и при появлении интернета.' + (s.text ? ' Последнее: <b>' + esc(s.text) + '</b>' + (s.at ? ' (' + new Date(s.at).toLocaleString('ru-RU') + ')' : '') + '.' : '')
+      ? 'Подключено. Проекты сами синхронизируются при запуске, через несколько секунд после правок, при сворачивании и возврате в приложение, при появлении интернета и раз в 2 минуты, пока приложение открыто.' + (s.text ? ' Последнее: <b>' + esc(s.text) + '</b>' + (s.at ? ' (' + new Date(s.at).toLocaleString('ru-RU') + ')' : '') + '.' : '')
       : 'Один раз установите скрипт синхронизации на свой Google-аккаунт (инструкция — файл <b>google-sync/УСТАНОВКА.md</b> в папке приложения), затем вставьте сюда адрес веб-приложения и ключ — на ПК и на телефоне.'));
     const g = document.createElement('div'); g.className = 'grid';
     g.innerHTML = '<label class="field wide"><span>Адрес веб-приложения (…/exec)</span><input type="text" data-k="url" placeholder="https://script.google.com/macros/s/…/exec"></label>' +
