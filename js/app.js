@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '65 (19.11.2026)';
+  const APP_VERSION = '68 (19.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -92,7 +92,28 @@
     openDialog('Имя проекта', d, ['spacer', { label: 'Отмена', onClick: closeDialog }, { label: 'Сохранить', cls: 'btn-primary', onClick: save }]);
     setTimeout(() => inp.focus(), 50);
   }
-  function updateHeader() { $('#projName').textContent = projTitle(P); }
+  function updateHeader() { $('#projName').textContent = projTitle(P) + (P.archived ? ' · в архиве' : ''); }
+
+  // ================= архив объектов =================
+  // p.archived — дата закрытия объекта (ISO); пусто — в работе. Данные не меняются, проект уходит в «Архив» списка проектов
+  function setArchived(p, on) {
+    if (on) p.archived = new Date().toISOString().slice(0, 10); else delete p.archived;
+    p.updatedAt = new Date().toISOString(); // чтобы ушло синхронизацией на другие устройства
+    if (p === P) touch(); else { saveStore(); document.dispatchEvent(new Event('idgen-saved')); }
+  }
+  function archiveProject(p) {
+    confirmBox('Закрыть объект «' + projTitle(p) + '» и перенести в архив? Все данные сохранятся — из архива его можно открыть, распечатать документы или вернуть в работу.', 'В архив', () => {
+      setArchived(p, true);
+      if (p === P) {
+        // открываем другой объект в работе (если таких нет — пустой новый)
+        const next = Object.values(store.projects).filter(x => x !== p && !x.archived).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))[0];
+        if (next) switchTo(next.id);
+        else { const np = C.emptyProject(); store.projects[np.id] = np; switchTo(np.id); }
+      } else render();
+      toast('Объект «' + projTitle(p) + '» в архиве', () => { setArchived(p, false); render(); });
+    });
+  }
+  function unarchiveProject(p) { setArchived(p, false); render(); updateHeader(); toast('Объект «' + projTitle(p) + '» снова в работе'); }
 
   // ================= уведомления =================
   let toastTimer;
@@ -224,12 +245,15 @@
     if (C.num(x.to.qty) !== C.num(r.qty)) parts.push('кол-во ' + C.qty(r.qty) + ' → ' + C.qty(x.to.qty) + ' ' + (r.unit || ''));
     const pu = C.num(r.priceWork) + C.num(r.priceMat), nu = C.num(x.to.priceWork) + C.num(x.to.priceMat);
     if (Math.abs(pu - nu) > 0.005) parts.push('цена ' + C.money(pu) + ' → ' + C.money(nu));
+    if (x.to.name && x.to.name !== r.name) parts.push('наименование как в ДС: «' + (x.to.name.length > 140 ? x.to.name.slice(0, 140) + '…' : x.to.name) + '»');
+    if (!parts.length || (parts.length === 1 && x.to.name && Math.abs(C.smetaRow(x.to).total - was) < 0.005)) return lbl + parts.join('; ');
     return lbl + (parts.join('; ') || 'без изменений') + ' · сумма ' + C.money(was) + ' → ' + C.money(now) + ' (' + (now - was >= 0 ? '+' : '−') + C.money(Math.abs(now - was)) + ')';
   }
   function applyPending(r, x) {
     if (x.act === 'ex') r.excludedBy = x.dsId;
     else {
-      (r.changes = r.changes || []).push({ dsId: x.dsId, from: { qty: r.qty, priceWork: r.priceWork, priceMat: r.priceMat }, to: Object.assign({}, x.to) });
+      // прежнее наименование тоже запоминаем — «Отменить изменение по ДС» вернёт и его
+      (r.changes = r.changes || []).push({ dsId: x.dsId, from: Object.assign({ qty: r.qty, priceWork: r.priceWork, priceMat: r.priceMat }, x.to.name ? { name: r.name } : {}), to: Object.assign({}, x.to) });
       Object.assign(r, x.to);
     }
     dropPending(r, x);
@@ -1990,27 +2014,41 @@
         btn('Новый проект', () => { const p = C.emptyProject(); store.projects[p.id] = p; switchTo(p.id); location.hash = '#/home'; newObjectWizard(); }),
         btn('Новый объект на основе текущего…', newFromCurrent)
       );
+      acts.appendChild(P.archived ? btn('Вернуть объект в работу', () => unarchiveProject(P)) : btn('Закрыть объект → в архив', () => archiveProject(P)));
       if (deferredInstall) acts.appendChild(btn('Установить приложение', installApp));
       main.appendChild(card('Текущий проект: ' + projTitle(P), [acts,
         para('Последнее изменение: ' + (P.updatedAt ? new Date(P.updatedAt).toLocaleString('ru-RU') : '—'))]));
+      const all = Object.values(store.projects).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
       const list = document.createElement('div'); list.className = 'list';
-      Object.values(store.projects).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')).forEach(p => {
-        const row = document.createElement('div'); row.className = 'row';
+      const archList = document.createElement('div'); archList.className = 'list';
+      all.forEach(p => {
+        const row = document.createElement('div'); row.className = 'row' + (p.archived ? ' arch' : '');
         const s = p.settings;
         row.innerHTML = '<button type="button" class="proj-name' + (s.shortName ? '' : ' empty') + '" title="Изменить короткое имя проекта">' + esc(s.shortName || '+ имя') + '</button>' +
-          '<div class="row-main"><div class="row-title">' + esc((s.objectName || 'Без названия') + (s.contractNo ? ' · дог. ' + s.contractNo : '')) + (p.id === P.id ? ' <span class="badge ok">открыт</span>' : '') + '</div><div class="row-sub">Актов: ' + p.acts.length + ' · материалов: ' + p.materials.length + (p.updatedAt ? ' · изменён ' + new Date(p.updatedAt).toLocaleDateString('ru-RU') : '') + '</div></div><div class="row-actions"></div>';
+          '<div class="row-main"><div class="row-title">' + esc((s.objectName || 'Без названия') + (s.contractNo ? ' · дог. ' + s.contractNo : '')) + (p.id === P.id ? ' <span class="badge ok">открыт</span>' : '') + (p.archived ? ' <span class="badge">закрыт ' + esc(C.fmtDate(p.archived)) + '</span>' : '') + '</div><div class="row-sub">Актов: ' + p.acts.length + ' · материалов: ' + p.materials.length + (p.updatedAt ? ' · изменён ' + new Date(p.updatedAt).toLocaleDateString('ru-RU') : '') + '</div></div><div class="row-actions"></div>';
         $('.proj-name', row).addEventListener('click', () => editShortName(p, render));
         const ra = $('.row-actions', row);
         if (p.id !== P.id) ra.appendChild(btn('Открыть', () => switchTo(p.id), 'btn-sm'));
+        ra.appendChild(p.archived ? btn('Вернуть в работу', () => unarchiveProject(p), 'btn-sm btn-primary') : btn('В архив', () => archiveProject(p), 'btn-sm'));
         ra.appendChild(btn('Копия', () => { const cp = C.normalize(JSON.parse(JSON.stringify(p))); cp.id = C.uid(); cp.settings.objectName = (cp.settings.objectName || '') + ' (копия)'; store.projects[cp.id] = cp; touch(); render(); }, 'btn-sm'));
         ra.appendChild(btn('Удалить', () => confirmBox('Удалить проект «' + projTitle(p) + '» с этого устройства? Сначала сохраните его в файл, если он нужен.', 'Удалить', () => {
           delete store.projects[p.id];
           if (p.id === P.id) { const ids = Object.keys(store.projects); if (!ids.length) { const np = C.emptyProject(); store.projects[np.id] = np; ids.push(np.id); } switchTo(ids[0]); }
           else { touch(); render(); }
         }, true), 'btn-sm btn-danger'));
-        list.appendChild(row);
+        (p.archived ? archList : list).appendChild(row);
       });
-      main.appendChild(card('Проекты на этом устройстве', [list]));
+      if (!list.children.length) list.appendChild(para('Все объекты в архиве. Создайте новый проект или верните объект из архива.'));
+      main.appendChild(card('Объекты в работе', [list]));
+      const nArch = archList.children.length;
+      if (nArch) {
+        // архив свёрнут; раскрыт, если открытый сейчас объект — из архива
+        const det = document.createElement('details'); det.className = 'card arch-card'; det.open = !!P.archived;
+        det.innerHTML = '<summary><b>📦 Архив — закрытые объекты (' + nArch + ')</b></summary>';
+        det.appendChild(para('Закрытые объекты хранятся со всеми данными: их можно открыть, распечатать документы или вернуть в работу.'));
+        det.appendChild(archList);
+        main.appendChild(det);
+      }
       if (window.IDSync) IDSync.renderCard(main);
       if (window.IDBackup) IDBackup.renderCard(main);
     },
@@ -2213,6 +2251,14 @@
     const cur = VIEWS[view] ? view : 'home';
     main.innerHTML = '';
     VIEWS[cur]();
+    // открыт объект из архива — напоминание и возврат в работу
+    if (P.archived) {
+      const b = document.createElement('div'); b.className = 'arch-banner';
+      b.innerHTML = '<span>📦 Объект в архиве (закрыт ' + esc(C.fmtDate(P.archived)) + '). Документы можно смотреть и печатать.</span>';
+      b.appendChild(btn('Вернуть в работу', () => unarchiveProject(P), 'btn-sm'));
+      main.prepend(b);
+    }
+    showSrvWarn();
     $$('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.view === cur || (a.dataset.also || '').split(',').includes(cur)));
     $$('.bottom-nav a').forEach(a => a.classList.toggle('active', a.dataset.view === cur || (cur === 'balance' && a.dataset.view === 'materials')));
     document.body.classList.remove('nav-open');
@@ -2522,6 +2568,33 @@
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => { }));
   }
+  // ПК: файлы приложения отдаёт локальный сервер (serve.ps1). Если он не запущен, браузер молча показывает
+  // сохранённую копию — она может быть старой версии. Проверяем HEAD-запросом (сервис-воркер его не подменяет из кэша)
+  var srvDown = false; // var: render() может вызвать showSrvWarn раньше этой строки
+  async function checkLocalServer() {
+    if (location.hostname !== 'localhost') return;
+    let up = false;
+    try { up = (await fetch('index.html?ping=' + Date.now(), { method: 'HEAD', cache: 'no-store' })).ok; } catch (e) { }
+    srvDown = !up;
+    if (up) {
+      const bar = $('#srvWarn'); if (bar) bar.remove();
+      // сервер есть — обновляем сохранённую копию до текущей версии (после Ctrl+F5 она могла остаться старой)
+      if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => { });
+      return;
+    }
+    showSrvWarn();
+  }
+  // плашка — первой строкой экрана (render() перерисовывает экран и ставит её снова)
+  function showSrvWarn() {
+    if (!srvDown || $('#srvWarn')) return;
+    const bar = document.createElement('div'); bar.id = 'srvWarn'; bar.className = 'srv-warn';
+    bar.innerHTML = '<span>⚠ Сервер приложения не запущен — открыта сохранённая копия (версия ' + esc(APP_VERSION) + '), она может быть устаревшей. ' +
+      'Запустите «Запустить на Windows.cmd» в папке приложения или перезагрузите компьютер — сервер стартует сам. Данные проектов при этом в сохранности.</span>';
+    bar.appendChild(btn('Проверить снова', async () => { await checkLocalServer(); if (!srvDown) location.reload(); else toast('Сервер по-прежнему не запущен'); }, 'btn-sm'));
+    main.prepend(bar);
+  }
+  checkLocalServer();
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkLocalServer(); });
 
   // До ноября 2026 приложение работало на localhost:8765, где теперь «Отчёты» и «Перемещение».
   // Проекты, сохранённые там в браузере, забираем через невидимую страницу со старого адреса (её отдаёт serve.ps1).

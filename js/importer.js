@@ -2329,7 +2329,9 @@
         const oldUnit = C.num(m.priceWork) + C.num(m.priceMat), newUnit = C.num(r.priceWork) + C.num(r.priceMat);
         const qtyCh = r.qty !== '' && Math.abs(C.num(r.qty) - C.num(m.qty)) > 1e-6;
         const priceCh = newUnit && Math.abs(newUnit - oldUnit) > 0.005;
-        if (qtyCh || priceCh) changes.push({ m, r, qtyCh, priceCh, newUnit });
+        // новая редакция расчёта: наименование — как в ДС (в КС пишут по действующему расчёту)
+        const nameCh = fullCalc && compact(m.name) !== compact(r.name);
+        if (qtyCh || priceCh || nameCh) changes.push({ m, r, qtyCh, priceCh, nameCh, newUnit });
         return false; // совпала и не изменилась — в ДС просто повторена позиция договора
       });
       const data = { no: str(sup.no), date: iso(sup.date), subject: str(sup.subject), priceMode: sup.priceMode || '', amount: str(sup.amount), newPrice: str(sup.newPrice), startDate: iso(sup.startDate), endDate: iso(sup.endDate), fullCalc: fullCalc ? 1 : '' };
@@ -2359,14 +2361,14 @@
       });
       // изменения существующих позиций и позиции, которых нет в новой редакции расчёта, — прикрепляются к позициям сметы;
       // принимаются там кнопкой «Применить» (по одной или все сразу), с показом «было → стало»
-      const pend = changes.map(({ m, r, qtyCh, priceCh, newUnit }) => {
+      const pend = changes.map(({ m, r, qtyCh, priceCh, nameCh, newUnit }) => {
         if (qtyCh && !C.num(r.qty)) return { m, act: 'ex', note: 'в ДС количество 0', what: 'исключить' };
         // новая цена за единицу делится между работой и материалом в прежней пропорции (материала нет — вся в работы)
         const oldUnit = C.num(m.priceWork) + C.num(m.priceMat);
         const pw = priceCh ? (oldUnit ? C.round2(C.num(m.priceWork) * newUnit / oldUnit) : newUnit) : m.priceWork;
         const pm = priceCh ? (C.num(m.priceMat) ? C.round2(newUnit - pw) : m.priceMat) : m.priceMat;
-        const what = [qtyCh ? 'кол-во ' + C.qty(m.qty) + ' → ' + C.qty(r.qty) + ' ' + (m.unit || '') : '', priceCh ? 'цена ' + C.money(oldUnit) + ' → ' + C.money(newUnit) : ''].filter(Boolean).join('; ');
-        return { m, act: 'ch', to: { qty: qtyCh ? r.qty : m.qty, priceWork: pw, priceMat: pm }, what, note: compact(m.name) !== compact(r.name) ? 'в ДС: «' + r.name.slice(0, 90) + (r.name.length > 90 ? '…' : '') + '»' : '' };
+        const what = [qtyCh ? 'кол-во ' + C.qty(m.qty) + ' → ' + C.qty(r.qty) + ' ' + (m.unit || '') : '', priceCh ? 'цена ' + C.money(oldUnit) + ' → ' + C.money(newUnit) : '', nameCh ? 'наименование — как в ДС' : ''].filter(Boolean).join('; ');
+        return { m, act: 'ch', to: Object.assign({ qty: qtyCh ? r.qty : m.qty, priceWork: pw, priceMat: pm }, nameCh ? { name: r.name } : {}), what, note: compact(m.name) !== compact(r.name) ? 'в ДС: «' + r.name.slice(0, 90) + (r.name.length > 90 ? '…' : '') + '»' : '' };
       });
       // ДС с новой редакцией всего расчёта (совпала хотя бы половина позиций договора): позиций договора, которых в нём нет, возможно, больше нет
       if (fullCalc) contractRows.filter(r => !usedRows.has(r)).forEach(m => pend.push({ m, act: 'ex', note: 'нет в расчёте ДС', what: 'нет в расчёте ДС — исключить?' }));
@@ -2376,7 +2378,7 @@
         list: pend.map(x => x.m.name + ' — ' + x.what),
         apply: () => pend.forEach(x => {
           const rec = { dsId, act: x.act, note: x.note };
-          if (x.act === 'ch') rec.to = { qty: numStr(x.to.qty), priceWork: numStr(x.to.priceWork), priceMat: numStr(x.to.priceMat) };
+          if (x.act === 'ch') rec.to = Object.assign({ qty: numStr(x.to.qty), priceWork: numStr(x.to.priceWork), priceMat: numStr(x.to.priceMat) }, x.to.name ? { name: x.to.name } : {});
           // повторная загрузка того же ДС заменяет прежнее непринятое изменение
           x.m.pendingDs = (x.m.pendingDs || []).filter(y => y.dsId !== dsId).concat([rec]);
         })
