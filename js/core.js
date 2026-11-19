@@ -140,6 +140,7 @@
         stageName: ''
       },
       orgs: [], people: [], materials: [], works: [], acts: [], smeta: [],
+      ksHistory: [], supplements: [], schemes: [], candidates: [],
       rdSections: [], // разделы рабочей документации: { section, code, docName, designerKey }
       ozhr: {
         builderRepName: '', builderRepPos: '', builderRepDoc: '', builderRepNrs: '',
@@ -595,8 +596,10 @@
   }
   function ksItems(p) {
     const wo = !!p.ks.worksOnly, pm = ksPeriodMode(p);
-    return smetaRows(p, wo).filter(r => inKsScope(p, r) && (!pm || num(r.qtyNow))).map(r => {
-      const qty = pm ? r.qtyNow : r.qty;
+    // объёмы за период не указаны — в КС остаток сметы (то, что ещё не закрыто прошлыми КС)
+    const rest = r => round2((num(r.qty) - qtyDoneBefore(p, r.id)) * 1000) / 1000;
+    return smetaRows(p, wo).filter(r => inKsScope(p, r) && (pm ? num(r.qtyNow) : rest(r) > 0)).map(r => {
+      const qty = pm ? r.qtyNow : String(rest(r));
       const d = rowDs(p, r);
       return { r, qty, ds: d, c: smetaRow(Object.assign({}, r, { qty }), wo) };
     });
@@ -703,9 +706,13 @@
       const ks = p.ks, tot = ksTotals(p);
       p.smeta.filter(r => r.name && num(r.qtyNow) && num(r.qty) && qtyDoneBefore(p, r.id) + num(r.qtyNow) - num(r.qty) > 1e-6)
         .forEach(r => E('#/smeta', 'Смета: по позиции «' + r.name.slice(0, 60) + '» выполнено больше, чем в смете (' + qty(qtyDoneBefore(p, r.id) + num(r.qtyNow)) + ' из ' + qty(r.qty) + ').'));
-      if (!ks.number || !ks.date) W('#/smeta', 'КС: не указан номер или дата составления.');
-      if (!ks.periodFrom || !ks.periodTo) W('#/smeta', 'КС: не указан отчётный период.');
-      if (!ks.contractorSignerName || !ks.customerSignerName) W('#/smeta', 'КС: не указаны подписанты.');
+      // вся смета уже закрыта прошлыми КС и новой нет — реквизиты следующей КС не проверяем
+      const ksEmpty = (p.ksHistory || []).length > 0 && !ksItems(p).length;
+      if (!ksEmpty) {
+        if (!ks.number || !ks.date) W('#/smeta', 'КС: не указан номер или дата составления.');
+        if (!ks.periodFrom || !ks.periodTo) W('#/smeta', 'КС: не указан отчётный период.');
+        if (!ks.contractorSignerName || !ks.customerSignerName) W('#/smeta', 'КС: не указаны подписанты.');
+      }
       p.smeta.filter(r => r.name && !num(r.qty)).forEach(r => W('#/smeta', 'Смета: у позиции «' + r.name.slice(0, 60) + '» нет количества.'));
       // цена договора с учётом ДС — с НДС; сравниваем с суммами с НДС (при ценах без НДС — после начисления НДС)
       const cp = contractPriceNow(p), price = cp.total;

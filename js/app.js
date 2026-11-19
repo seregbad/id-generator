@@ -7,7 +7,7 @@
   const esc = t => String(t === null || t === undefined ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const STORE_KEY = 'idgen.v1';
   // версия приложения — видна внизу меню; меняется вместе с VERSION в sw.js
-  const APP_VERSION = '64 (17.11.2026)';
+  const APP_VERSION = '65 (19.11.2026)';
 
   // ================= хранилище =================
   let store = { projects: {}, current: null };
@@ -1582,7 +1582,7 @@
         kpi.innerHTML = tile('Цена договора' + (cp.hasDs ? ' с учётом ДС' : ''), price ? C.money(price) : '—', match) +
           tile('Смета с НДС' + (t.top ? ' (без НДС ' + C.money(t.net) + ')' : ''), C.money(t.gross)) +
           tile((t.top ? 'НДС ' : 'в т.ч. НДС ') + t.vatPct + '%', C.money(t.vatSum)) +
-          tile(esc(ksName('КС')) + (C.ksPeriodMode(P) ? ' (объёмы за период)' : ' (вся смета)') + ', с НДС', C.money(k.gross)) +
+          tile(esc(ksName('КС')) + (C.ksPeriodMode(P) ? ' (объёмы за период)' : P.ksHistory.length ? ' (остаток сметы)' : ' (вся смета)') + ', с НДС', k.gross || !P.ksHistory.length ? C.money(k.gross) : '—', !k.gross && P.ksHistory.length ? '<span class="kpi-ok">✓ вся смета закрыта</span>' : '') +
           (P.ksHistory.length ? tile('Закрыто КС: ' + P.ksHistory.length, C.money(before)) : '') +
           tile('Остаток по договору', C.money((price || t.gross) - before - k.gross));
       };
@@ -1764,7 +1764,7 @@
       };
       const closeKs = () => {
         const k = C.ksTotals(P);
-        if (!k.total) { toast('В КС нет сумм'); return; }
+        if (!k.total) { toast(P.ksHistory.length && !C.ksPeriodMode(P) ? 'Вся смета уже закрыта прошлыми КС — закрывать нечего' : 'В КС нет сумм'); return; }
         confirmBox('Закрыть КС № ' + (P.ks.number || '—') + ' на ' + C.money(k.total) + ' руб.? Объёмы этого периода запомнятся, поля «В этой КС» очистятся, номер станет ' + ((parseInt(P.ks.number, 10) || 0) + 1) + '.', 'Закрыть КС', () => {
           if (window.IDBackup) IDBackup.snapshot('перед закрытием КС № ' + (P.ks.number || ''));
           P.ksHistory.push({
